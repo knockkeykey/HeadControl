@@ -6,7 +6,9 @@ struct GesturesPage: View {
     @State private var selected: Gesture = .tiltLeft
     @State private var recording: Gesture?
     private var motion: MotionService { controller.motion }
-    private func tuning(_ g: Gesture) -> GestureTuning { store.configuration.tuning[g.rawValue] ?? .preset(.standard, for: g) }
+    private var enabledGestures: [Gesture] { store.configuration.enabledGestures }
+    private var passedCount: Int { controller.testPassed.intersection(enabledGestures).count }
+    private func tuning(_ g: Gesture) -> GestureTuning { store.configuration.tuning[g.rawValue] ?? .defaults(for: g) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -38,7 +40,7 @@ struct GesturesPage: View {
                 ForEach(Gesture.allCases) { tile($0) }
             }
             HStack {
-                Text("默认：左歪头 → 右 ⌥，完整点头 → ↩，其余不操作。点按键可重新录制。").font(.caption).foregroundStyle(.secondary)
+                Text("默认开启左右歪头和完整点头；左歪头 → 右 ⌥，完整点头 → ↩。关闭的头势不参与识别。").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("恢复默认按键") { store.configuration.bindings = Configuration.defaultBindings }
             }
@@ -67,7 +69,7 @@ struct GesturesPage: View {
                     HStack(spacing: 14) {
                         ZStack {
                             Circle().stroke(Color.secondary.opacity(0.15), lineWidth: 5)
-                            Circle().trim(from: 0, to: Double(controller.testPassed.count) / 6).stroke(Color.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                            Circle().trim(from: 0, to: Double(passedCount) / Double(max(1, enabledGestures.count))).stroke(Color.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
                                 .rotationEffect(.degrees(-90)).animation(.spring, value: controller.testPassed.count)
                             GestureGlyph(gesture: target, size: 20).foregroundStyle(Color.accentColor)
                         }.frame(width: 54, height: 54)
@@ -80,16 +82,17 @@ struct GesturesPage: View {
                     Button("结束测试") { controller.setTesting(false) }
                 } else {
                     Label("已校准 · \(motion.sensor)", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
-                    Text("逐个做一遍 6 个头势，测完会按你的实际动作给出建议。测试时不会发送按键。")
+                    Text(enabledGestures.isEmpty ? "先打开至少一个头势，再开始测试。" : "逐个测试已开启的 \(enabledGestures.count) 个头势，测完会按你的实际动作给出建议。测试时不会发送按键。")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button { controller.startAllTests() } label: { Label("依次测试全部", systemImage: "play.fill").frame(maxWidth: .infinity) }
+                    Button { controller.startAllTests() } label: { Label("依次测试已开启头势", systemImage: "play.fill").frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).controlSize(.large)
+                        .disabled(enabledGestures.isEmpty)
                     HStack {
                         Button("重新校准") { controller.calibrate() }
                         if controller.testing { Button("结束测试") { controller.setTesting(false) } }
                     }
                     if !controller.testPassed.isEmpty {
-                        Text("已通过 \(controller.testPassed.count) / 6").font(.caption).foregroundStyle(.secondary)
+                        Text("已通过 \(passedCount) / \(enabledGestures.count)").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -100,32 +103,44 @@ struct GesturesPage: View {
 
     private func tile(_ g: Gesture) -> some View {
         let t = tuning(g)
+        let enabled = store.configuration.isEnabled(g)
         let isSelected = selected == g
         let firing = controller.lastTrigger?.gesture == g
         let suggestion = controller.suggestion(for: g)
         let testing = controller.testTarget == g
         return VStack(spacing: 10) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 GestureGlyph(gesture: g, size: 15).foregroundStyle(Color.accentColor).frame(width: 20)
                 Text(g.title).font(.headline)
                 if controller.testPassed.contains(g) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).transition(.scale).help("测试已通过")
                 }
                 Spacer()
+                Toggle("启用\(g.title)", isOn: Binding(get: { store.configuration.isEnabled(g) }, set: { value in
+                    store.configuration.recognitionEnabled[g.rawValue] = value
+                }))
+                .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                .help(enabled ? "关闭后不参与识别，也不占用冷却时间" : "开启这个头势")
+            }
+            HStack(spacing: 6) {
+                Text(enabled ? "已开启" : "已关闭").font(.caption).foregroundStyle(.secondary)
+                Spacer()
                 if isSelected { InfoButton(title: g.title, points: helpPoints(g), help: "说明") }
                 Button { controller.startTest(g) } label: {
                     Label(testing ? "测试中" : "测试", systemImage: testing ? "waveform" : "play.fill")
                         .symbolEffect(.variableColor.iterative, isActive: testing)
+                        .fixedSize()
                 }
                 .controlSize(.small).buttonStyle(.bordered).buttonBorderShape(.capsule)
-                .disabled(!motion.calibrated || testing)
-                .help(motion.calibrated ? "做一次这个头势，测试时不发送按键" : "先在右上方完成校准")
+                .disabled(!enabled || !motion.calibrated || testing)
+                .help(!enabled ? "先开启这个头势再测试" : motion.calibrated ? "做一次这个头势，测试时不发送按键" : "先在右上方完成校准")
             }
-            ArcGauge(value: motion.calibrated ? g.travel(motion.pose) : 0,
+            ArcGauge(value: enabled && motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
                      peak: controller.testPeaks[g], suggestion: suggestion?.angle,
-                     lit: testing, ready: ready(g))
+                     lit: testing, ready: enabled && ready(g))
                 .frame(height: 96)
+                .opacity(enabled ? 1 : 0.4)
             statusLine(g, t)
             if suggestion != nil {
                 HStack(spacing: 6) {
@@ -219,7 +234,10 @@ struct GesturesPage: View {
 
     /// The recognizer's actual decision for this gesture, so "reached the gauge" and "fires" never disagree silently.
     @ViewBuilder private func statusLine(_ g: Gesture, _ t: GestureTuning) -> some View {
-        if motion.calibrated, let st = controller.gestureStatus[g] {
+        if !store.configuration.isEnabled(g) {
+            Text("不参与识别，也不占用冷却时间").font(.caption2).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 14, maxHeight: 14, alignment: .leading)
+        } else if motion.calibrated, let st = controller.gestureStatus[g] {
             let (text, color): (String, Color) = {
                 switch st.phase {
                 case .release: return ("稍微收回一点，才能再次触发", .secondary)
@@ -247,7 +265,7 @@ struct GesturesPage: View {
         Binding(get: { tuning(g).angle }, set: { value in
             var t = tuning(g)
             guard t.angle != value else { return }
-            t.angle = value; t.neutral = min(t.neutral, value - 1); t.preset = .custom
+            t.angle = value; t.neutral = min(t.neutral, value - 1)
             store.configuration.tuning[g.rawValue] = t
         })
     }
@@ -258,15 +276,30 @@ struct GesturesPage: View {
         let t = tuning(g)
         let sound = store.configuration.sound(g)
         return VStack(spacing: 0) {
-            Divider().padding(.leading, 10)
-            settingRow("灵敏度") {
-                Picker("灵敏度", selection: Binding(get: { t.preset }, set: { value in
-                    if value != .custom { store.configuration.tuning[g.rawValue] = .preset(value, for: g) }
-                })) { ForEach(Sensitivity.allCases) { Text($0.title).tag($0) } }
-                    .pickerStyle(.segmented).labelsHidden()
+            if !g.isSequence {
+                Divider().padding(.leading, 10)
+                DurationSlider(value: dwellBinding(g), info: dwellHelp)
+            } else {
+                Divider().padding(.leading, 10)
+                DurationSlider(value: parameterBinding(g, \.completion, step: 0.05), range: 0.35...2, title: "完成时限", info: completionHelp)
+                Divider().padding(.leading, 10)
+                DurationSlider(value: parameterBinding(g, \.neutral, step: 1), range: 2...min(15, t.angle - 1), title: "回位范围", info: neutralHelp, step: 1, unit: "°")
             }
             Divider().padding(.leading, 10)
-            settingRow("速度") { SpeedSlider(value: speedBinding(g), measured: controller.measuredSpeed(for: g)) }
+            settingRow("速度", labelWidth: 76, info: speedHelp(g)) {
+                Spacer(minLength: 0)
+                Toggle("启用\(g.title)的速度条件", isOn: Binding(get: { tuning(g).speedEnabled }, set: { value in
+                    var next = tuning(g); next.speedEnabled = value
+                    store.configuration.tuning[g.rawValue] = next
+                }))
+                .toggleStyle(.switch).labelsHidden()
+            }
+            if t.speedEnabled {
+                SpeedSlider(value: speedBinding(g), measured: controller.measuredSpeed(for: g))
+                    .padding(.horizontal, 10).padding(.bottom, 8)
+            }
+            Divider().padding(.leading, 10)
+            DurationSlider(value: parameterBinding(g, \.cooldown, step: 0.05), range: 0.3...3, title: "冷却时间", info: cooldownHelp)
             Divider().padding(.leading, 10)
             settingRow("提醒音") {
                 Picker("提醒音", selection: Binding(get: { sound }, set: { value in
@@ -288,31 +321,108 @@ struct GesturesPage: View {
         }
         .controlSize(.small)
     }
-    private func settingRow<C: View>(_ label: String, @ViewBuilder _ content: () -> C) -> some View {
+    private func settingRow<C: View>(_ label: String, labelWidth: CGFloat = 46, info: [(String, String)]? = nil, @ViewBuilder _ content: () -> C) -> some View {
         HStack(spacing: 8) {
-            Text(label).font(.callout).frame(width: 46, alignment: .leading)
+            HStack(spacing: 4) {
+                Text(label).font(.callout).fixedSize()
+                if let info { InfoButton(title: label, points: info, help: "了解\(label)") }
+            }.frame(width: labelWidth, alignment: .leading)
             content()
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
     }
     private func helpPoints(_ g: Gesture) -> [(String, String)] {
         [("hand.draw", g.isSequence
-            ? "做一个完整的\(g == .nod ? "低头再抬起" : "左右摇头再回正")，太慢不会触发。"
-            : "歪到圆点的位置并停一下就触发，稍微收回一点就能再次触发。"),
+            ? "在完成时限内做一个完整的\(g == .nod ? "低头再抬起" : "左右摇头再回正")。"
+            : "越过角度门槛后保持到设定时长即可触发，稍微收回一点就能再次触发。"),
          ("circle.circle", "拖动白色圆点调整动作幅度。蓝色是当前幅度，灰色是回正区，橙色是测试后的建议位置。"),
-         ("gauge.with.needle", "速度越靠右，只有越干脆的动作才会触发；橙点是你上次测试的速度。"),
+         ("gauge.with.needle", "速度条件可单独关闭。开启后，滑块越靠右，动作需要越快；橙点是你上次测试的速度。"),
          ("speaker.wave.2", "每完成一次这个头势都会播放所选提醒音。"),
-         ("pause.circle", "修改参数后头势控制会自动暂停。")]
+         ("switch.2", "头势开关与执行动作独立。关闭后不参与识别，不播放提醒音，也不会占用其他头势的冷却时间；原有按键和参数会保留。"),
+         ("pause.circle", "修改参数会清空未完成的动作，新设置从下一个动作开始生效。")]
+    }
+    private var dwellHelp: [(String, String)] {
+        [("timer", "越过角度门槛后，保持到这个时长才触发。"),
+         ("minus.circle", "调短会更快响应，但短暂歪头或转头也更容易触发。"),
+         ("plus.circle", "调长需要保持更久，可以过滤短暂动作。")]
+    }
+    private func speedHelp(_ g: Gesture) -> [(String, String)] {
+        [("switch.2", "关闭后不检查动作速度，慢动作也能触发；仍需满足幅度和时间条件。"),
+         ("gauge.with.needle", "开启后，滑块越靠右，动作需要越快；越靠左，较慢的动作也能通过。"),
+         ("hand.draw", g.isSequence ? "往返两个方向都要达到速度要求，完成整个动作仍需在完成时限内。" : "检查到达角度门槛前后的峰值速度，保持姿势时不必一直移动。"),
+         ("circle.fill", "橙点标记上次测试的实际速度，方便你手动比较和调整。")]
+    }
+    private var completionHelp: [(String, String)] {
+        [("timer", "从达到动作幅度开始，到完成点头或摇头并回位，最多允许的时间。"),
+         ("plus.circle", "调长给慢动作更多时间；调短要求更快完成。它和速度开关独立生效。")]
+    }
+    private var neutralHelp: [(String, String)] {
+        [("scope", "点头或摇头后，回到距校准正前方这个角度以内，才算完成。"),
+         ("plus.circle", "调大更容易完成回位；调小要求回得更正。")]
+    }
+    private var cooldownHelp: [(String, String)] {
+        [("hourglass", "一次触发后，等待这段时间才允许任何头势再次触发。"),
+         ("plus.circle", "调长可以减少连续误触；调短适合连续操作。")]
+    }
+    private func parameterBinding(_ g: Gesture, _ key: WritableKeyPath<GestureTuning, Double>, step: Double) -> Binding<Double> {
+        Binding(get: { tuning(g)[keyPath: key] }, set: { value in
+            var next = tuning(g)
+            let rounded = (value / step).rounded() * step
+            guard next[keyPath: key] != rounded else { return }
+            next[keyPath: key] = rounded
+            store.configuration.tuning[g.rawValue] = next
+        })
     }
     private func speedBinding(_ g: Gesture) -> Binding<Double> {
         Binding(get: { tuning(g).speed }, set: { value in
             var t = tuning(g)
             let rounded = (value / 5).rounded() * 5
             guard t.speed != rounded else { return }
-            t.speed = rounded; t.preset = .custom
+            t.speed = rounded
             store.configuration.tuning[g.rawValue] = t
         })
     }
+    private func dwellBinding(_ g: Gesture) -> Binding<Double> {
+        Binding(get: { tuning(g).dwell }, set: { value in
+            var t = tuning(g)
+            let rounded = (value / GestureTuning.dwellStep).rounded() * GestureTuning.dwellStep
+            guard t.dwell != rounded else { return }
+            t.dwell = rounded
+            store.configuration.tuning[g.rawValue] = t
+        })
+    }
+}
+
+struct DurationSlider: View {
+    @Binding var value: Double
+    var range = GestureTuning.dwellRange
+    var title = "持续时长"
+    var info: [(String, String)]
+    var step = GestureTuning.dwellStep
+    var unit = "秒"
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Text(title).font(.callout).fixedSize()
+                InfoButton(title: title, points: info, help: "了解\(title)")
+                Spacer(minLength: 0)
+                Text(displayValue)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .accessibilityHidden(true)
+            }
+            Slider(value: $value, in: range, step: step) { Text(title) }
+                .labelsHidden()
+                .accessibilityLabel(title)
+                .accessibilityValue(Text(displayValue))
+                .help("\(title)：\(displayValue)")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+    }
+
+    private var displayValue: String { unit == "°" ? "\(Int(value))°" : String(format: "%.2f %@", value, unit) }
 }
 
 /// Unitless speed requirement: slow movements also count ↔ only brisk movements count.

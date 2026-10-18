@@ -40,7 +40,7 @@ struct Trigger: Equatable {
     private var operation = false
     private var suspended = false
     private var timer: Timer?
-    private var currentSound: NSSound?
+    private let feedback = SoundFeedback()
     private var cancellables: Set<AnyCancellable> = []
     var overlayChanged: (() -> Void)?
     var statusTitle: String { testing ? "正在测试头势" : walkingPaused ? "走动中 · 已暂停" : enabled ? "头势控制已开启" : "已暂停" }
@@ -57,8 +57,14 @@ struct Trigger: Equatable {
             guard let self else { return }
             // New settings apply to the next gesture; control stays on.
             self.router.configurationChanged(); self.keys.release()
+            self.gestureStatus = [:]; self.blockedHint = nil
+            self.testPassed.formIntersection(self.store.configuration.enabledGestures)
+            if let target = self.testTarget, !self.store.configuration.isEnabled(target) { self.setTesting(false) }
+            if let trailing = self.trailing, !self.store.configuration.isEnabled(trailing) { self.trailing = nil }
+            self.prepareSounds()
             self.overlayChanged?()
         }
+        prepareSounds()
         motion.onSample = { [weak self] sample in self?.receive(sample) }
         motion.onInvalidation = { [weak self] reason in self?.pause(reason) }
         // Forward nested changes so views observing only the controller stay current.
@@ -106,13 +112,15 @@ struct Trigger: Equatable {
 
     // MARK: Calibration test
     func startTest(_ gesture: Gesture, all: Bool = false) {
+        guard store.configuration.isEnabled(gesture) else { return }
         if !testing { setTesting(true) }
         testingAll = all; testTarget = gesture; testPeaks[gesture] = 0; testSpeeds[gesture] = SpeedPeak()
         router.setMode(.testing)
     }
     func startAllTests() {
+        guard let first = store.configuration.enabledGestures.first else { return }
         testPassed.removeAll(); testPeaks.removeAll(); testSpeeds.removeAll()
-        startTest(Gesture.allCases[0], all: true)
+        startTest(first, all: true)
     }
     func stopTest() { testTarget = nil; testingAll = false; trailing = nil }
     struct Suggestion: Equatable { var angle: Double; var speed: Double? }
@@ -125,7 +133,7 @@ struct Trigger: Equatable {
     /// One suggestion for both angle and speed, offered only when it changes something.
     func suggestion(for gesture: Gesture) -> Suggestion? {
         guard let peak = testPeaks[gesture], peak >= 8 else { return nil }
-        let tuning = store.configuration.tuning[gesture.rawValue] ?? .preset(.standard, for: gesture)
+        let tuning = store.configuration.tuning[gesture.rawValue] ?? .defaults(for: gesture)
         guard let angle = ThresholdAdvisor.suggest(peak: peak, tuning: tuning) else { return nil }
         let speed = measuredSpeed(for: gesture).flatMap { ThresholdAdvisor.suggestSpeed(peak: $0) }
         let changesAngle = abs(angle - tuning.angle) >= 1
@@ -134,8 +142,8 @@ struct Trigger: Equatable {
     }
     func applySuggestion(_ gesture: Gesture) {
         guard let value = suggestion(for: gesture) else { return }
-        var t = store.configuration.tuning[gesture.rawValue] ?? .preset(.standard, for: gesture)
-        t.angle = value.angle; t.neutral = min(t.neutral, value.angle - 1); t.preset = .custom
+        var t = store.configuration.tuning[gesture.rawValue] ?? .defaults(for: gesture)
+        t.angle = value.angle; t.neutral = min(t.neutral, value.angle - 1)
         if let speed = value.speed { t.speed = speed }
         store.configuration.tuning[gesture.rawValue] = t
     }
@@ -159,9 +167,12 @@ struct Trigger: Equatable {
         }
         if suspended { suspended = false; router.setMode(testing ? .testing : .active); overlayChanged?() }
         if trailing != nil, max(abs(sample.yaw),abs(sample.pitch),abs(sample.roll)) < 7 { trailing = nil }
-        let route = router.update(sample,configuration:store.configuration)
+        let route = router.update(sample,configuration:store.configuration,testingGesture:testTarget)
         publishStatus()
         guard let route else { return }
+        // This acknowledges recognition, independent of key delivery. Start before a
+        // shortcut can open voice input and reconfigure the Bluetooth audio device.
+        playSound(for: route.gesture)
         if testing { showPreview(route); return }
         guard route.executes else {
             if enabled {
@@ -179,7 +190,6 @@ struct Trigger: Equatable {
         guard router.accepts(route), enabled, !operation else { return }
         if route.binding.action == .pause {
             lastTrigger = Trigger(gesture:route.gesture,caps:[],executed:true,message:"暂停头势控制")
-            playSound(for: route.gesture)
             pause("已通过\(route.gesture.title)暂停"); return
         }
         guard route.binding.action == .shortcut, let shortcut = route.binding.shortcut, let targetPID else { return }
@@ -190,7 +200,6 @@ struct Trigger: Equatable {
             notice = "\(route.gesture.title) → 已点按 \(shortcut.label)"
             lastTrigger = Trigger(gesture:route.gesture,caps:shortcut.caps,executed:true,message:notice)
             record(notice)
-            playSound(for: route.gesture)
         } catch {
             guard router.accepts(route), enabled else { return }
             notice = error.localizedDescription; record(notice)
@@ -206,7 +215,7 @@ struct Trigger: Equatable {
         for (g, st) in next where gestureStatus[g]?.phase != st.phase {
             switch st.phase {
             case .tooSlow:
-                let need = Int((store.configuration.tuning[g.rawValue] ?? .preset(.standard, for: g)).speed)
+                let need = Int((store.configuration.tuning[g.rawValue] ?? .defaults(for: g)).speed)
                 blockedHint = "\(g.shortTitle)太慢 \(Int(st.speed ?? 0))/\(need)°/s"
             case .fired: blockedHint = nil
             default: break
@@ -221,12 +230,14 @@ struct Trigger: Equatable {
         let message = "\(route.gesture.title) → \(action)（测试，未发送）"
         lastTrigger = Trigger(gesture:route.gesture,caps:caps,executed:false,message:message)
         record(message)
-        playSound(for: route.gesture)
         if let target = testTarget, target == route.gesture {
             testPassed.insert(target); trailing = target
-            if testingAll, let i = Gesture.allCases.firstIndex(of: target), i + 1 < Gesture.allCases.count {
-                let next = Gesture.allCases[i + 1]
-                testTarget = next; testPeaks[next] = 0
+            let gestures = store.configuration.enabledGestures
+            if testingAll, let i = gestures.firstIndex(of: target), i + 1 < gestures.count {
+                let next = gestures[i + 1]
+                testTarget = next; testPeaks[next] = 0; testSpeeds[next] = SpeedPeak()
+                // A new test target starts fresh, without the previous test's cooldown.
+                router.configurationChanged()
             } else { testTarget = nil; testingAll = false }
         }
         overlayChanged?()
@@ -240,10 +251,14 @@ struct Trigger: Equatable {
         guard store.configuration.sound else { return }
         previewSound(store.configuration.sound(gesture))
     }
-    /// Plays a system alert sound by name; stops the previous one so rapid gestures don't pile up.
+    private func prepareSounds() {
+        guard store.configuration.sound else { return }
+        feedback.prepare(Set(Gesture.allCases.map { store.configuration.sound($0) }))
+    }
+    /// Preview and recognition share the same player and output-device recovery.
     func previewSound(_ name: String) {
-        guard !name.isEmpty, let sound = NSSound(named: .init(name)) else { return }
-        currentSound?.stop(); currentSound = sound; sound.play()
+        do { try feedback.play(name) }
+        catch { record("提醒音播放失败：\(error.localizedDescription)") }
     }
     private func record(_ message: String) {
         if events.first == message { return }

@@ -8,8 +8,8 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var symbol: String { switch self { case .status: "airpodspro"; case .gestures: "person.crop.circle"; case .general: "gearshape" } }
     var subtitle: String {
         switch self {
-        case .status: "按清单完成准备，打开开关就能用头控制。"
-        case .gestures: "为每个头势选一个按键。小球背对着你，拖动圆弧上的圆点调整动作幅度。"
+        case .status: "按清单完成准备，点击“启动头势控制”就能开始使用。"
+        case .gestures: "开启需要的头势，再选择按键。小球背对着你，拖动圆弧上的圆点调整动作幅度。"
         case .general: "悬浮条、提示音、走动暂停和程序坞图标。"
         }
     }
@@ -88,13 +88,28 @@ struct StatusPage: View {
                         if motion.calibrated { Label("已校准 · 数据来自\(motion.sensor)", systemImage: "scope").font(.caption).foregroundStyle(.green) }
                     }
                     Spacer()
-                    VStack(alignment: .trailing, spacing: 8) {
-                        Toggle("头势控制", isOn: Binding(get: { controller.enabled }, set: { controller.setEnabled($0) }))
-                            .toggleStyle(.switch).controlSize(.large).labelsHidden()
-                            .disabled(!controller.readyToEnable && !controller.enabled)
-                        Text(controller.enabled ? "已开启" : "已暂停").font(.caption.weight(.medium)).foregroundStyle(controller.enabled ? .green : .secondary)
-                    }
+                    Label(controller.enabled ? (controller.walkingPaused ? "走动中 · 自动暂停" : "头势控制已开启") : "尚未启动",
+                          systemImage: controller.enabled ? (controller.walkingPaused ? "pause.circle.fill" : "checkmark.circle.fill") : "pause.circle")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(controller.enabled ? (controller.walkingPaused ? Color.orange : .green) : .secondary)
+                        .fixedSize()
                 }
+                Button { controller.setEnabled(!controller.enabled) } label: {
+                    Label(controller.enabled ? "停止头势控制" : "启动头势控制",
+                          systemImage: controller.enabled ? "stop.fill" : "power")
+                        .font(.system(size: 19, weight: .semibold))
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(ControlLaunchButtonStyle(running: controller.enabled))
+                .disabled(!controller.readyToEnable && !controller.enabled)
+                .padding(.top, 20)
+                .accessibilityHint(controller.enabled ? "停止通过头势触发快捷键" : "启动后，做头势即可触发设定的快捷键")
+                Text(controller.enabled ? (controller.walkingPaused ? "走动时暂停识别，停下后自动恢复。" : "正在运行，做头势即可触发设定的快捷键。") :
+                        (controller.readyToEnable ? "点击上方按钮，开始用头势触发快捷键。" : "请先完成下方准备清单，再点击启动。"))
+                    .font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
                 Divider().padding(.vertical, 8)
                 Label(controller.notice, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
             }
@@ -119,13 +134,33 @@ struct StatusPage: View {
     }
 }
 
+private struct ControlLaunchButtonStyle: ButtonStyle {
+    let running: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: ButtonStyleConfiguration) -> some View {
+        configuration.label
+            .foregroundStyle(running || !isEnabled ? Color.primary : .white)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(running || !isEnabled ? Color.primary.opacity(0.08) : Color.accentColor)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(running ? 0.12 : 0.04))
+            }
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.5)
+            .offset(y: configuration.isPressed ? 1 : 0)
+    }
+}
+
 /// One list for everything needed before head control can run: both permissions, headphones,
 /// calibration and at least one bound gesture. Each row carries its own fix-it button.
 struct ReadinessChecklist: View {
     @ObservedObject var controller: AppController
     let go: (SettingsPage) -> Void
     private var motion: MotionService { controller.motion }
-    private var bound: Int { Gesture.allCases.filter { controller.store.configuration.binding($0).action != .disabled }.count }
+    private var bound: Int { controller.store.configuration.enabledGestures.filter { controller.store.configuration.binding($0).action != .disabled }.count }
     private var done: Int { [motion.authorized, controller.controlTrusted, motion.tracking, motion.calibrated, bound > 0].filter { $0 }.count }
 
     var body: some View {
@@ -161,7 +196,7 @@ struct ReadinessChecklist: View {
                     action: motion.tracking ? ("校准", { controller.calibrate() }) : nil, keepActionWhenDone: true)
                 Divider().padding(.leading, 46)
                 row(icon: "keyboard", color: .indigo, title: "设置头势按键",
-                    detail: "已绑定 \(bound) / 6 个头势", ok: bound > 0,
+                    detail: "已开启并绑定 \(bound) 个头势", ok: bound > 0,
                     action: ("编辑", { go(.gestures) }), keepActionWhenDone: true)
                 Text("不需要麦克风、蓝牙、屏幕录制或网络。").font(.caption).foregroundStyle(.tertiary).padding(.top, 10)
             }
