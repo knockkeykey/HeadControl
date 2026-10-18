@@ -91,7 +91,7 @@ struct Trigger: Equatable {
     func setEnabled(_ value: Bool) {
         guard value else { pause("头势控制已暂停"); return }
         guard motion.tracking, motion.calibrated else { notice = "请先连接耳机并校准正前方"; return }
-        guard keys.canPost else { notice = "请先在“权限”页授予辅助功能"; return }
+        guard keys.canPost else { notice = "请先在“状态”页的准备清单里授予辅助功能"; return }
         stopTest(); testing = false; enabled = true; router.setMode(.active)
         notice = "已开启：做头势会点按对应快捷键"
         overlayChanged?()

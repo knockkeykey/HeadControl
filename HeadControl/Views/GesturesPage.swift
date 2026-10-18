@@ -4,11 +4,21 @@ struct GesturesPage: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: ConfigurationStore
     @State private var selected: Gesture = .tiltLeft
+    @State private var recording: Gesture?
     private var motion: MotionService { controller.motion }
     private func tuning(_ g: Gesture) -> GestureTuning { store.configuration.tuning[g.rawValue] ?? .preset(.standard, for: g) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if let gesture = recording {
+                Card {
+                    ShortcutRecorderPanel(gesture: gesture, save: { shortcut in
+                        store.configuration.set(GestureBinding(.shortcut, shortcut: shortcut), for: gesture)
+                        withAnimation(.spring(duration: 0.35)) { recording = nil }
+                    }, cancel: { withAnimation(.spring(duration: 0.35)) { recording = nil } })
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
             HStack(alignment: .top, spacing: 16) {
                 Card(padding: 0) {
                     HeadOrbView(pose: motion.pose, ghost: ghost, link: motion.link, enabled: controller.enabled)
@@ -25,6 +35,11 @@ struct GesturesPage: View {
             // Top-aligned so only the selected tile grows; its neighbours keep their compact height.
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3), spacing: 12) {
                 ForEach(Gesture.allCases) { tile($0) }
+            }
+            HStack {
+                Text("默认：左歪头 → 右 ⌥，完整点头 → ↩，其余不操作。点按键可重新录制。").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("恢复默认按键") { store.configuration.bindings = Configuration.defaultBindings }
             }
         }
     }
@@ -103,6 +118,7 @@ struct GesturesPage: View {
                      lit: controller.testTarget == g, ready: ready(g))
                 .frame(height: 112)
             statusLine(g, t)
+            actionRow(g)
             HStack {
                 if suggestion != nil {
                     Button("采用建议") { controller.applySuggestion(g) }.controlSize(.small).tint(.orange)
@@ -121,13 +137,56 @@ struct GesturesPage: View {
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.06), lineWidth: isSelected ? 2 : 1))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(border(g, selected: isSelected), lineWidth: isSelected || recording == g ? 2 : 1))
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .onTapGesture { withAnimation(.spring(duration: 0.3)) { selected = g } }
         .opacity(controller.walkingPaused ? 0.6 : 1)
         .flash(on: firing ? controller.lastTrigger?.id : nil, when: firing)
         .animation(.spring(duration: 0.3), value: controller.testPassed)
         .accessibilityElement(children: .contain).accessibilityLabel(g.title)
+    }
+
+    private func border(_ g: Gesture, selected: Bool) -> Color {
+        recording == g ? Color.red.opacity(0.6) : selected ? Color.accentColor : Color.primary.opacity(0.06)
+    }
+
+    // MARK: Key binding (formerly the Shortcuts page)
+
+    /// What this gesture does: a compact action menu plus the bound key, which is also the record button.
+    private func actionRow(_ g: Gesture) -> some View {
+        let binding = store.configuration.binding(g)
+        let firing = controller.lastTrigger?.gesture == g
+        return HStack(spacing: 8) {
+            Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
+            Picker("动作", selection: actionBinding(g)) { ForEach(ActionKind.allCases) { Text($0.title).tag($0) } }
+                .labelsHidden().fixedSize().controlSize(.small)
+            Spacer(minLength: 4)
+            switch binding.action {
+            case .shortcut:
+                Button { beginRecording(g) } label: {
+                    if let s = binding.shortcut { KeycapRow(caps: s.caps, size: 12, pressed: firing && controller.lastTrigger?.executed == true) }
+                    else { Label("录制", systemImage: "record.circle").font(.caption).foregroundStyle(.red) }
+                }
+                .buttonStyle(.plain).help("点一下重新录制").accessibilityLabel("为\(g.title)录制快捷键")
+            case .pause:
+                Image(systemName: "pause.circle").foregroundStyle(.secondary).help("触发时暂停头势控制")
+            case .disabled:
+                EmptyView()
+            }
+        }
+        .frame(height: 26)
+        .opacity(binding.action == .disabled ? 0.7 : 1)
+    }
+
+    private func beginRecording(_ g: Gesture) {
+        controller.setEnabled(false)
+        withAnimation(.spring(duration: 0.35)) { recording = g; selected = g }
+    }
+    private func actionBinding(_ g: Gesture) -> Binding<ActionKind> {
+        Binding(get: { store.configuration.binding(g).action }, set: { action in
+            var b = store.configuration.binding(g); b.action = action
+            if action == .shortcut, b.shortcut == nil { beginRecording(g) } else { store.configuration.set(b, for: g) }
+        })
     }
 
     /// Green only when the recognizer would actually accept this gesture right now, not merely when the angle is past the knob.

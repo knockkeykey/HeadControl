@@ -2,16 +2,14 @@ import SwiftUI
 import AppKit
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case status, gestures, shortcuts, permissions, general
+    case status, gestures, general
     var id: String { rawValue }
-    var title: String { switch self { case .status: "状态"; case .gestures: "头势"; case .shortcuts: "快捷键"; case .permissions: "权限"; case .general: "通用" } }
-    var symbol: String { switch self { case .status: "airpodspro"; case .gestures: "person.crop.circle"; case .shortcuts: "keyboard"; case .permissions: "lock.shield"; case .general: "gearshape" } }
+    var title: String { switch self { case .status: "状态"; case .gestures: "头势"; case .general: "通用" } }
+    var symbol: String { switch self { case .status: "airpodspro"; case .gestures: "person.crop.circle"; case .general: "gearshape" } }
     var subtitle: String {
         switch self {
-        case .status: "一眼看清：耳机、权限、是否在工作。"
-        case .gestures: "小球背对着你，跟你往同一边转。拖动圆弧上的圆点调整动作幅度。"
-        case .shortcuts: "每个头势按一个键。点“录制”，直接按键盘。"
-        case .permissions: "头势控制需要两项权限，点名称旁的问号看为什么需要。"
+        case .status: "按清单完成准备，打开开关就能用头控制。"
+        case .gestures: "为每个头势选一个按键。小球背对着你，拖动圆弧上的圆点调整动作幅度。"
         case .general: "悬浮条、提示音、走动暂停和程序坞图标。"
         }
     }
@@ -35,7 +33,7 @@ struct SettingsRoot: View {
                     HStack {
                         Label(item.title, systemImage: item.symbol)
                         Spacer()
-                        if item == .permissions && !controller.permissionsReady {
+                        if item == .status && !controller.permissionsReady {
                             Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange).accessibilityLabel("有权限未授予")
                         }
                     }.tag(item).padding(.vertical, 5)
@@ -61,8 +59,6 @@ struct SettingsRoot: View {
                     switch current {
                     case .status: StatusPage(controller: controller) { page = $0 }
                     case .gestures: GesturesPage(controller: controller, store: controller.store)
-                    case .shortcuts: ShortcutsPage(controller: controller, store: controller.store)
-                    case .permissions: PermissionCards(controller: controller)
                     case .general: GeneralPage(controller: controller, store: controller.store)
                     }
                 }
@@ -80,7 +76,6 @@ struct StatusPage: View {
     @ObservedObject var controller: AppController
     let go: (SettingsPage) -> Void
     private var motion: MotionService { controller.motion }
-    private var bound: Int { Gesture.allCases.filter { controller.store.configuration.binding($0).action != .disabled }.count }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Card(padding: 22) {
@@ -104,41 +99,101 @@ struct StatusPage: View {
                 Label(controller.notice, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary)
             }
             HStack(alignment: .top, spacing: 16) {
-                Card {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionTitle(title: "准备清单")
-                        step(controller.permissionsReady, "授予两项权限", "运动与健身、辅助功能", action: controller.permissionsReady ? nil : ("去授权", { go(.permissions) }))
-                        step(motion.tracking, "戴上耳机", motion.tracking ? "数据来自\(motion.sensor)" : motion.link.detail,
-                             action: motion.tracking ? nil : ("重新连接", { motion.reconnect() }))
-                        step(motion.calibrated, "校准正前方", "正对屏幕时点一下", action: motion.tracking ? ("校准", { controller.calibrate() }) : nil)
-                        step(bound > 0, "设置快捷键", "已绑定 \(bound) / 6 个头势", action: ("编辑", { go(.shortcuts) }))
-                    }
-                }
+                ReadinessChecklist(controller: controller, go: go)
                 Card {
                     VStack(alignment: .leading, spacing: 12) {
                         SectionTitle(title: "最近一次")
-                        HeadOrbView(pose: motion.pose, link: motion.link, enabled: controller.enabled)
-                            .frame(height: 170).frame(maxWidth: .infinity)
-                            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         LastTriggerView(trigger: controller.lastTrigger)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         Divider()
                         if controller.events.isEmpty { Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary) }
-                        ForEach(Array(controller.events.prefix(4).enumerated()), id: \.offset) { _, e in
+                        ForEach(Array(controller.events.prefix(6).enumerated()), id: \.offset) { _, e in
                             Text(e).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                     }
                 }
                 .flash(on: controller.lastTrigger?.id, when: true)
-                .frame(maxWidth: 340)
+                .frame(width: 290)
             }
         }
     }
-    private func step(_ ok: Bool, _ title: String, _ detail: String, action: (String, () -> Void)?) -> some View {
-        HStack {
-            CheckLine(ok: ok, title: title, detail: detail)
-            Spacer()
-            if let action { Button(action.0, action: action.1).controlSize(.small) }
+}
+
+/// One list for everything needed before head control can run: both permissions, headphones,
+/// calibration and at least one bound gesture. Each row carries its own fix-it button.
+struct ReadinessChecklist: View {
+    @ObservedObject var controller: AppController
+    let go: (SettingsPage) -> Void
+    private var motion: MotionService { controller.motion }
+    private var bound: Int { Gesture.allCases.filter { controller.store.configuration.binding($0).action != .disabled }.count }
+    private var done: Int { [motion.authorized, controller.controlTrusted, motion.tracking, motion.calibrated, bound > 0].filter { $0 }.count }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline) {
+                    SectionTitle(title: "准备清单")
+                    Spacer()
+                    Text(done == 5 ? "全部就绪" : "\(done) / 5 完成")
+                        .font(.caption.weight(.medium)).foregroundStyle(done == 5 ? .green : .secondary)
+                        .contentTransition(.numericText())
+                }
+                .padding(.bottom, 10)
+                row(icon: "figure.walk.motion", color: .pink, title: "运动与健身",
+                    detail: "读取 AirPods 里的头部动作", ok: motion.authorized,
+                    info: [("eye", "只读取耳机报告的头部转动，以及你是否在走动"), ("heart.slash", "不读取健康 App、步数或位置数据"), ("internaldrive", "数据只在这台 Mac 上即时计算，不保存、不上传")],
+                    action: (motion.authorization == .notDetermined ? "允许" : "打开系统设置", { motion.requestPermission() }), prominent: true)
+                Divider().padding(.leading, 46)
+                row(icon: "accessibility", color: .blue, title: "辅助功能",
+                    detail: "替你按下设定好的快捷键", ok: controller.controlTrusted,
+                    info: [("keyboard", "识别到头势时，替你点按一次你设定的键"), ("eye.slash", "不读取输入内容，不记录键盘，不看屏幕"), ("hand.raised", "macOS 要求：任何向其他应用发送按键的工具都需要它"), ("arrow.clockwise", "如果打开开关后仍显示未授权，退出并重新打开本应用")],
+                    action: ("去授权", {
+                        controller.requestAccessibility()
+                        if !controller.controlTrusted { controller.openPrivacy("Privacy_Accessibility") }
+                    }), prominent: true)
+                Divider().padding(.leading, 46)
+                row(icon: "airpodspro", color: .gray, title: "戴上耳机",
+                    detail: motion.tracking ? "数据来自\(motion.sensor)" : motion.link.detail, ok: motion.tracking,
+                    action: ("重新连接", { motion.reconnect() }))
+                Divider().padding(.leading, 46)
+                row(icon: "scope", color: .teal, title: "校准正前方",
+                    detail: motion.calibrated ? "可随时重新校准" : "正对屏幕坐好，头放正", ok: motion.calibrated,
+                    action: motion.tracking ? ("校准", { controller.calibrate() }) : nil, keepActionWhenDone: true)
+                Divider().padding(.leading, 46)
+                row(icon: "keyboard", color: .indigo, title: "设置头势按键",
+                    detail: "已绑定 \(bound) / 6 个头势", ok: bound > 0,
+                    action: ("编辑", { go(.gestures) }), keepActionWhenDone: true)
+                Text("不需要麦克风、蓝牙、屏幕录制或网络。").font(.caption).foregroundStyle(.tertiary).padding(.top, 10)
+            }
+            .animation(.spring(duration: 0.3), value: done)
         }
+    }
+
+    private func row(icon: String, color: Color, title: String, detail: String, ok: Bool,
+                     info: [(String, String)]? = nil, action: (String, () -> Void)?,
+                     prominent: Bool = false, keepActionWhenDone: Bool = false) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon).font(.system(size: 15, weight: .medium)).foregroundStyle(.white)
+                .frame(width: 32, height: 32).background(color.gradient, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(title).font(.body.weight(.medium))
+                    if let info { InfoButton(title: "为什么需要\(title)？", points: info) }
+                }
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if let action, !ok || keepActionWhenDone {
+                if prominent { Button(action.0, action: action.1).buttonStyle(.borderedProminent).controlSize(.small) }
+                else { Button(action.0, action: action.1).controlSize(.small) }
+            }
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 18)).foregroundStyle(ok ? Color.green : Color.secondary.opacity(0.5))
+                .contentTransition(.symbolEffect(.replace))
+                .accessibilityLabel(ok ? "已完成" : "未完成")
+        }
+        .padding(.vertical, 9)
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -160,48 +215,6 @@ struct LastTriggerView: View {
         .id(trigger?.id)
         .transition(.scale(scale: 0.85).combined(with: .opacity))
         .animation(.spring(duration: 0.3), value: trigger?.id)
-    }
-}
-
-// MARK: Permissions
-
-struct PermissionCards: View {
-    @ObservedObject var controller: AppController
-    var body: some View {
-        VStack(spacing: 14) {
-            card(icon: "figure.walk.motion", color: .pink, title: "运动与健身",
-                 subtitle: "读取 AirPods 里的头部动作", ok: controller.motion.authorized,
-                 info: [("eye", "只读取耳机报告的头部转动，以及你是否在走动"), ("heart.slash", "不读取健康 App、步数或位置数据"), ("internaldrive", "数据只在这台 Mac 上即时计算，不保存、不上传")],
-                 button: controller.motion.authorization == .notDetermined ? "允许" : "打开系统设置",
-                 action: { controller.motion.requestPermission() })
-            card(icon: "accessibility", color: .blue, title: "辅助功能",
-                 subtitle: "替你按下设定好的快捷键", ok: controller.controlTrusted,
-                 info: [("keyboard", "识别到头势时，替你点按一次你设定的键"), ("eye.slash", "不读取输入内容，不记录键盘，不看屏幕"), ("hand.raised", "macOS 要求：任何向其他应用发送按键的工具都需要它"), ("arrow.clockwise", "如果打开开关后仍显示未授权，退出并重新打开本应用")],
-                 button: "去授权", action: {
-                     controller.requestAccessibility()
-                     if !controller.controlTrusted { controller.openPrivacy("Privacy_Accessibility") }
-                 })
-            Text("不需要麦克风、蓝牙、屏幕录制或网络。").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-    private func card(icon: String, color: Color, title: String, subtitle: String, ok: Bool, info: [(String, String)], button: String, action: @escaping () -> Void) -> some View {
-        Card {
-            HStack(spacing: 16) {
-                Image(systemName: icon).font(.system(size: 22, weight: .medium)).foregroundStyle(.white)
-                    .frame(width: 44, height: 44).background(color.gradient, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) { Text(title).font(.headline); InfoButton(title: "为什么需要\(title)？", points: info) }
-                    Text(subtitle).font(.callout).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if ok {
-                    Label("已允许", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout.weight(.medium))
-                        .transition(.scale.combined(with: .opacity))
-                } else {
-                    Button(button, action: action).buttonStyle(.borderedProminent)
-                }
-            }.animation(.spring(duration: 0.3), value: ok)
-        }
     }
 }
 
