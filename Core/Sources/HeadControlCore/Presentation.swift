@@ -52,6 +52,14 @@ public extension Gesture {
         case .shake: abs(s.yaw)
         }
     }
+    /// Signed angular velocity on this gesture's axis.
+    func rate(_ r: AxisRates) -> Double {
+        switch self {
+        case .tiltLeft, .tiltRight: r.roll
+        case .turnLeft, .turnRight, .shake: r.yaw
+        case .nod: r.pitch
+        }
+    }
     var prompt: String {
         switch self {
         case .tiltLeft: "把头向左肩歪，停一下"
@@ -74,6 +82,26 @@ public enum ThresholdAdvisor {
         let lower = max(8, tuning.neutral + 1)
         return min(50, max(lower, (peak * 0.7).rounded()))
     }
+    /// Same 70% rule for the speed gate, rounded to 5 °/s.
+    public static func suggestSpeed(peak: Double) -> Double? {
+        guard peak.isFinite, peak > 0 else { return nil }
+        let range = GestureTuning.speedRange
+        return min(range.upperBound, max(range.lowerBound, (peak * 0.7 / 5).rounded() * 5))
+    }
+}
+
+/// Fastest movement seen in each direction of one axis.
+public struct SpeedPeak: Equatable, Sendable {
+    public private(set) var forward = 0.0
+    public private(set) var backward = 0.0
+    public private(set) var measured = false
+    public init() {}
+    public mutating func record(_ rate: Double) {
+        guard rate.isFinite else { return }
+        measured = true; forward = max(forward, rate); backward = max(backward, -rate)
+    }
+    /// A held gesture needs one fast stroke; a nod or shake needs both strokes fast.
+    public func effective(sequence: Bool) -> Double { sequence ? min(forward, backward) : max(forward, backward) }
 }
 
 /// Key naming shared by the recorder, the virtual keyboard and keycap rendering.

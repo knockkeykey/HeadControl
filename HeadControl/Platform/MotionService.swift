@@ -9,26 +9,24 @@ import CoreMotion
     @Published private(set) var pose = MotionSample(time: 0)
     @Published private(set) var sensor = "未知"
     @Published private(set) var authorization = CMHeadphoneMotionManager.authorizationStatus()
-    @Published private(set) var telemetry: HeadphoneTelemetry?
-    @Published private(set) var activityState: PublicDataState = .stopped
-    @Published private(set) var activity: HeadphoneActivityReading?
-    @Published private(set) var activityConnection = "未监听"
+    /// The headphones report walking or running; used to suspend gestures, never shown as data.
+    @Published private(set) var walking = false
     var onSample: ((MotionSample) -> Void)?
     var onInvalidation: ((String) -> Void)?
     private var manager = CMHeadphoneMotionManager()
     private let activityManager = CMHeadphoneActivityManager()
-    private var cadence = MotionCadence()
     private var session = UUID()
     private var activitySession = UUID()
     private var activityListening = false
-    private var activityStatusListening = false
     private var reference: CMAttitude?
     private var current: CMAttitude?
     private var lastReceived: Date?
     private var lastUI: Double?
-    private var lastTelemetryUI: Double?
     private var started = false
     private var timer: Timer?
+    /// Keeps App Nap from throttling sample delivery while the app sits in the background,
+    /// which is exactly when gestures are used for real.
+    private var activity: NSObjectProtocol?
     override init() {
         super.init(); manager.delegate = self
         // Always-on watch: permission changes and data gaps must surface even before the first start().
@@ -38,8 +36,6 @@ import CoreMotion
     }
     var authorized: Bool { authorization == .authorized }
     var status: String { link.title }
-    var deviceMotionActive: Bool { manager.isDeviceMotionActive }
-    var connectionUpdatesActive: Bool { manager.isConnectionStatusActive }
 
     func start() {
         guard manager.isDeviceMotionAvailable else { stop(); link = .unavailable; return }
@@ -49,6 +45,8 @@ import CoreMotion
         if tracking || calibrated { onInvalidation?("耳机采集已重新启动，请重新校准") }
         stop()
         started = true; link = .waiting; manager.startConnectionStatusUpdates()
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+                                                         reason: "实时识别耳机头势")
         let token = session
         startActivityServices()
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
@@ -74,8 +72,9 @@ import CoreMotion
         session = UUID()
         manager.stopDeviceMotionUpdates(); manager.stopConnectionStatusUpdates(); started = false
         stopActivityServices()
+        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
         lastReceived = nil; current = nil; reference = nil; tracking = false; calibrated = false; link = .idle
-        clearTelemetry(); sensor = "未知"
+        lastUI = nil; sensor = "未知"
     }
     func recenter() {
         guard tracking, let copy = current?.copy() as? CMAttitude else { return }
@@ -88,7 +87,7 @@ import CoreMotion
             authorization = auth
             if auth == .authorized && started { start(); return }
             if auth == .denied || auth == .restricted {
-                stopActivityServices(); activityState = .denied
+                stopActivityServices()
                 invalidate("运动与健身权限不可用"); link = .permissionDenied; return
             }
         }
@@ -104,7 +103,7 @@ import CoreMotion
         switch motion.sensorLocation { case .headphoneLeft: nextSensor = "左耳"; case .headphoneRight: nextSensor = "右耳"; default: nextSensor = "未知" }
         if nextSensor != sensor {
             if sensor != "未知" {
-                calibrated = false; reference = nil; clearTelemetry()
+                calibrated = false; reference = nil; lastUI = nil
                 onInvalidation?("数据来源耳机改变，请重新校准")
             }
             sensor = nextSensor
@@ -113,68 +112,41 @@ import CoreMotion
         if let reference { relative.multiply(byInverseOf: reference) }
         let degrees = 180.0 / Double.pi
         // Same headphone coordinate convention as HeadOrbit: right yaw positive, down pitch negative.
-        let sample = MotionSample(time: motion.timestamp, yaw: -relative.yaw * degrees, pitch: relative.pitch * degrees, roll: relative.roll * degrees)
+        // Body-frame gyro: x ≈ pitch, y ≈ roll, z ≈ yaw near the calibrated pose. The speed gate
+        // compares magnitudes per axis, so only the axis pairing matters, not the sign.
+        let r = motion.rotationRate
+        let rate = AxisRates(yaw: -r.z * degrees, pitch: r.x * degrees, roll: r.y * degrees)
+        let sample = MotionSample(time: motion.timestamp, yaw: -relative.yaw * degrees, pitch: relative.pitch * degrees,
+                                  roll: relative.roll * degrees, rate: rate.finite ? rate : nil)
         if !tracking { tracking = true; startActivityServices(restart: true) }
         if link != .tracking { link = .tracking }
-        cadence.record(sample.time)
         if lastUI == nil || sample.time < lastUI! || sample.time - lastUI! >= 0.05 {
             pose = sample; lastUI = sample.time
         }
-        // Numeric diagnostics update at 10 Hz. Gesture recognition still receives every sample.
-        if lastTelemetryUI == nil || sample.time < lastTelemetryUI! || sample.time - lastTelemetryUI! >= 0.1 {
-            telemetry = HeadphoneTelemetry(motion: motion, cadence: cadence)
-            lastTelemetryUI = sample.time
-        }
         if calibrated { onSample?(sample) }
-    }
-    private func clearTelemetry() {
-        telemetry = nil; cadence.reset(); lastUI = nil; lastTelemetryUI = nil
     }
 
     private func startActivityServices(restart: Bool = false) {
-        guard started, authorized else { return }
+        guard started, authorized, activityManager.isActivityAvailable else { return }
         if restart { stopActivityServices() }
+        guard !activityListening else { return }
+        activityListening = true
         let token = activitySession
-        if activityManager.isActivityAvailable {
-            if !activityListening {
-                activityListening = true
-                activityState = .waiting
-                activityManager.startActivityUpdates(to: .main) { [weak self] reading, error in
-                    guard let self, self.started, self.activitySession == token else { return }
-                    if let error { self.activity = nil; self.activityState = .failed(error.localizedDescription); return }
-                    guard let reading else { return }
-                    self.activity = HeadphoneActivityReading(reading); self.activityState = .receiving
-                }
-            }
-        } else { activity = nil; activityState = .unsupported }
-        if activityManager.isStatusAvailable {
-            if !activityStatusListening {
-                activityStatusListening = true
-                activityConnection = "等待连接事件"
-                activityManager.startStatusUpdates(to: .main) { [weak self] status, error in
-                    guard let self, self.started, self.activitySession == token else { return }
-                    if let error { self.activityConnection = error.localizedDescription; return }
-                    switch status {
-                    case .connected: self.activityConnection = "已连接"
-                    case .disconnected:
-                        self.activityConnection = "已断开"; self.activity = nil
-                        if self.activityState == .receiving { self.activityState = .waiting }
-                    @unknown default: self.activityConnection = "未知状态"
-                    }
-                }
-            }
-        } else { activityConnection = "当前设备不支持" }
+        activityManager.startActivityUpdates(to: .main) { [weak self] reading, error in
+            guard let self, self.started, self.activitySession == token else { return }
+            // An error or missing reading must never leave gestures suspended.
+            let moving = error == nil && (reading?.walking == true || reading?.running == true)
+            if moving != self.walking { self.walking = moving }
+        }
     }
 
     private func stopActivityServices() {
         activitySession = UUID()
-        activityManager.stopActivityUpdates(); activityManager.stopStatusUpdates()
-        activityListening = false; activityStatusListening = false
-        activity = nil; activityState = .stopped; activityConnection = "未监听"
+        activityManager.stopActivityUpdates()
+        activityListening = false; walking = false
     }
     private func invalidate(_ reason: String) {
-        tracking = false; calibrated = false; reference = nil; current = nil; link = .interrupted(reason); onInvalidation?(reason)
-        clearTelemetry()
+        tracking = false; calibrated = false; reference = nil; current = nil; lastUI = nil; link = .interrupted(reason); onInvalidation?(reason)
     }
     nonisolated func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
         Task { @MainActor [weak self] in
@@ -185,8 +157,7 @@ import CoreMotion
     nonisolated func headphoneMotionManagerDidDisconnect(_ manager: CMHeadphoneMotionManager) {
         Task { @MainActor [weak self] in
             guard let self, self.started, manager === self.manager else { return }
-            self.activity = nil
-            if self.activityState == .receiving { self.activityState = .waiting }
+            self.walking = false
             self.invalidate("耳机已断开，戴回后需重新校准")
         }
     }

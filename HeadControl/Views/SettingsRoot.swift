@@ -9,10 +9,10 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .status: "一眼看清：耳机、权限、是否在工作。"
-        case .gestures: "小球背对着你，跟你往同一边转。拖动圆弧上的圆点调整需要转多大角度。"
+        case .gestures: "小球背对着你，跟你往同一边转。拖动圆弧上的圆点调整动作幅度。"
         case .shortcuts: "每个头势按一个键。点“录制”，直接按键盘。"
         case .permissions: "头势控制需要两项权限，点名称旁的问号看为什么需要。"
-        case .general: "悬浮条、提示音和程序坞图标。"
+        case .general: "悬浮条、提示音、走动暂停和程序坞图标。"
         }
     }
 }
@@ -170,8 +170,8 @@ struct PermissionCards: View {
     var body: some View {
         VStack(spacing: 14) {
             card(icon: "figure.walk.motion", color: .pink, title: "运动与健身",
-                 subtitle: "读取 AirPods 的姿态、运动和活动状态", ok: controller.motion.authorized,
-                 info: [("eye", "读取耳机报告的头部角度、角速度、加速度与活动分类"), ("heart.slash", "不读取健康 App、步数或位置数据"), ("internaldrive", "数据只在这台 Mac 上即时计算，不保存、不上传")],
+                 subtitle: "读取 AirPods 里的头部动作", ok: controller.motion.authorized,
+                 info: [("eye", "只读取耳机报告的头部转动，以及你是否在走动"), ("heart.slash", "不读取健康 App、步数或位置数据"), ("internaldrive", "数据只在这台 Mac 上即时计算，不保存、不上传")],
                  button: controller.motion.authorization == .notDetermined ? "允许" : "打开系统设置",
                  action: { controller.motion.requestPermission() })
             card(icon: "accessibility", color: .blue, title: "辅助功能",
@@ -181,8 +181,7 @@ struct PermissionCards: View {
                      controller.requestAccessibility()
                      if !controller.controlTrusted { controller.openPrivacy("Privacy_Accessibility") }
                  })
-            Text("头势控制不需要麦克风。头势页的可选电平功能会单独申请麦克风权限，不保存音频。无需蓝牙、屏幕录制或网络权限。")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+            Text("不需要麦克风、蓝牙、屏幕录制或网络。").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
     private func card(icon: String, color: Color, title: String, subtitle: String, ok: Bool, info: [(String, String)], button: String, action: @escaping () -> Void) -> some View {
@@ -217,7 +216,9 @@ struct GeneralPage: View {
                 VStack(alignment: .leading, spacing: 14) {
                     toggleRow("悬浮状态条", "开启时在屏幕顶部显示最近的头势和按键", "rectangle.topthird.inset.filled", $store.configuration.overlay)
                     Divider()
-                    toggleRow("提示音", "每次成功按键时轻响一声", "speaker.wave.2", $store.configuration.sound)
+                    toggleRow("提示音", "每完成一个头势都会响一声，可在“头势”页为每个头势选择不同声音", "speaker.wave.2", $store.configuration.sound)
+                    Divider()
+                    toggleRow("走动时自动暂停", "走路或跑步时不识别头势，停下后自动恢复", "figure.walk", $store.configuration.pauseWhileWalking)
                     Divider()
                     toggleRow("在程序坞显示图标", "关闭后只留在菜单栏，点菜单栏图标打开设置", "dock.rectangle", $controller.showDockIcon)
                 }

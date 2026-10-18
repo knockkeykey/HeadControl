@@ -19,13 +19,17 @@ public struct GestureRouter: Sendable {
     public mutating func configurationChanged() {
         setMode(mode == .testing ? .testing : .paused)
     }
+    public var status: [Gesture: GestureStatus] { recognizer.status }
+    public var offCenter: Double { recognizer.offCenter }
+    public var rearmLimit: Double { recognizer.rearmLimit }
     public func preview(_ gesture: Gesture, configuration: Configuration) -> Route? {
         guard mode == .testing else { return nil }
         return Route(gesture:gesture,binding:configuration.binding(gesture),executes:false,revision:revision)
     }
     public mutating func update(_ sample: MotionSample, configuration: Configuration) -> Route? {
-        guard mode != .paused,
-              let gesture = recognizer.update(sample,tuning:configuration.tuning) else { return nil }
+        // Recognition also runs while paused so the meter shows the real decision; nothing is routed.
+        let recognized = recognizer.update(sample,tuning:configuration.tuning)
+        guard mode != .paused, let gesture = recognized else { return nil }
         let binding = configuration.binding(gesture)
         return Route(gesture:gesture,binding:binding,executes:mode == .active && binding.action != .disabled,revision:revision)
     }

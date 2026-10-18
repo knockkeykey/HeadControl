@@ -35,7 +35,10 @@ private struct StatusHUD: View {
     var body: some View {
         HStack(spacing: 12) {
             HeadphoneBadge(link: controller.motion.link, enabled: controller.enabled, size: 36)
-            if let t = controller.lastTrigger {
+            if let hint = controller.blockedHint {
+                Image(systemName: "tortoise.fill").font(.system(size: 13)).foregroundStyle(.orange)
+                Text(hint).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+            } else if let t = controller.lastTrigger {
                 GestureGlyph(gesture: t.gesture, size: 16).foregroundStyle(t.executed ? Color.green : Color.accentColor)
                 Image(systemName: "arrow.right").font(.caption).foregroundStyle(.tertiary)
                 if t.caps.isEmpty { Text(t.gesture.shortTitle).font(.system(size: 12)) }

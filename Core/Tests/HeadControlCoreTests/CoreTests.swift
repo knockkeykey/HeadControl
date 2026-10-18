@@ -45,6 +45,58 @@ final class GestureTests: XCTestCase {
         feed(0.3); feed(0.24,pitch:-25); feed(0.04,pitch:-10)
         XCTAssertEqual(seen,[.nod])
     }
+    /// Feed angles with a matching gyro rate: rate is the per-step change in degrees per second.
+    func move(_ seconds: Double, from a: (Double,Double,Double), to b: (Double,Double,Double)) {
+        let steps = max(1, Int(seconds / 0.02))
+        for i in 1...steps {
+            time += 0.02
+            let f = Double(i) / Double(steps)
+            let rate = AxisRates(yaw:(b.0-a.0)/seconds, pitch:(b.1-a.1)/seconds, roll:(b.2-a.2)/seconds)
+            let s = MotionSample(time:time, yaw:a.0+(b.0-a.0)*f, pitch:a.1+(b.1-a.1)*f, roll:a.2+(b.2-a.2)*f, rate:rate)
+            if let g = recognizer.update(s,tuning:tuning) { seen.append(g) }
+        }
+    }
+    func hold(_ seconds: Double, _ p: (Double,Double,Double)) { move(seconds, from:p, to:p) }
+    func testSlowTiltIsPostureNotGesture() {
+        hold(0.3,(0,0,0)); move(2,from:(0,0,0),to:(0,0,-25)); hold(1,(0,0,-25))   // ~12 °/s
+        XCTAssertTrue(seen.isEmpty)
+    }
+    func testBriskTiltPassesSpeedGate() {
+        hold(0.3,(0,0,0)); move(0.2,from:(0,0,0),to:(0,0,-25)); hold(0.6,(0,0,-25))  // 125 °/s
+        XCTAssertEqual(seen,[.tiltLeft])
+    }
+    func testSpeedThresholdIsPerGestureAndTunable() {
+        tuning[Gesture.tiltLeft.rawValue]?.speed = 200
+        hold(0.3,(0,0,0)); move(0.2,from:(0,0,0),to:(0,0,-25)); hold(0.6,(0,0,-25))
+        XCTAssertTrue(seen.isEmpty)
+    }
+    func testNodNeedsBothStrokesFast() {
+        hold(0.3,(0,0,0)); move(0.12,from:(0,0,0),to:(0,-25,0)); move(0.6,from:(0,-25,0),to:(0,0,0)); hold(0.2,(0,0,0))
+        XCTAssertTrue(seen.isEmpty)
+        recognizer.reset(); time += 1
+        hold(0.3,(0,0,0)); move(0.12,from:(0,0,0),to:(0,-25,0)); move(0.12,from:(0,-25,0),to:(0,0,0)); hold(0.2,(0,0,0))
+        XCTAssertEqual(seen,[.nod])
+    }
+    func testStatusExplainsSlowAndMixedAndRecenter() {
+        tuning[Gesture.tiltLeft.rawValue]?.speed = 200
+        hold(0.3,(0,0,0)); move(0.2,from:(0,0,0),to:(0,0,-25)); hold(0.6,(0,0,-25))
+        XCTAssertEqual(recognizer.status[.tiltLeft]?.phase, .tooSlow)
+        recognizer.reset(); time += 1
+        feed(0.3); feed(0.2,yaw:22,roll:-24)
+        XCTAssertEqual(recognizer.status[.tiltLeft]?.phase, .mixed)
+        recognizer.reset(); time += 1
+        feed(0.5,roll:-30)
+        XCTAssertEqual(recognizer.status[.tiltLeft]?.phase, .recenter)
+    }
+    func testStatusFiredMatchesEmittedGesture() {
+        feed(0.3); feed(0.6,roll:-24)
+        XCTAssertEqual(seen,[.tiltLeft])
+        XCTAssertNotEqual(recognizer.status[.tiltLeft]?.phase, .tooSlow)
+    }
+    func testSamplesWithoutGyroSkipSpeedGate() { feed(0.3); feed(0.6,roll:-24); XCTAssertEqual(seen,[.tiltLeft]) }
+    func testNaNRateDiscardsSample() {
+        XCTAssertFalse(MotionSample(time:1, rate:.init(yaw:.nan)).finite)
+    }
     func testInvalidTimestampAndNaNDiscardPartialGesture() {
         feed(0.3); feed(0.2,pitch:-25)
         XCTAssertNil(recognizer.update(.init(time:time,pitch:.nan),tuning:tuning))
@@ -63,25 +115,60 @@ final class ConfigurationTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with:decoded.encoded()) as? [String:Any])
         XCTAssertNil(object["profiles"])
     }
+    func testPerGestureSoundsRoundTripAndDefaultForOlderFiles() throws {
+        XCTAssertEqual(Set(Gesture.allCases.map(\.defaultSound)).count, Gesture.allCases.count)
+        var c=Configuration(); c.sounds[Gesture.nod.rawValue]="Hero"; c.sounds[Gesture.shake.rawValue]=""
+        let decoded=try Configuration.decode(c.encoded())
+        XCTAssertEqual(decoded.sound(.nod),"Hero"); XCTAssertEqual(decoded.sound(.shake),"")
+        var json=try XCTUnwrap(JSONSerialization.jsonObject(with:c.encoded()) as? [String:Any])
+        json.removeValue(forKey:"sounds")
+        let old=try Configuration.decode(JSONSerialization.data(withJSONObject:json))
+        XCTAssertEqual(old.sound(.tiltLeft),"Tink"); XCTAssertEqual(old.sounds,Configuration.defaultSounds)
+        c.sounds[Gesture.nod.rawValue]="../evil"; XCTAssertFalse(c.isValid)
+    }
     func testLegacyMigrationKeepsTuningButDiscardsAppStateAssumptions() throws {
         var source=Configuration(); source.sound=false; source.tuning[Gesture.nod.rawValue]?.angle=26
         var json=try XCTUnwrap(JSONSerialization.jsonObject(with:source.encoded()) as? [String:Any])
         json["version"]=1; json.removeValue(forKey:"bindings")
         json["profiles"]=[["id":"com.tencent.xinWeChat","bindings":["ready.nod":["action":"submit"]]]]
         let migrated=try Configuration.decode(JSONSerialization.data(withJSONObject:json))
-        XCTAssertEqual(migrated.version,2); XCTAssertFalse(migrated.sound)
+        XCTAssertEqual(migrated.version,3); XCTAssertFalse(migrated.sound)
         XCTAssertEqual(migrated.tuning[Gesture.nod.rawValue]?.angle,26)
         XCTAssertEqual(migrated.binding(.nod).shortcut,.returnKey)
     }
+    func testVersion2MigrationAddsPresetSpeedAndKeepsOtherTuning() throws {
+        var source=Configuration()
+        source.tuning[Gesture.tiltLeft.rawValue] = .preset(.steady, for:.tiltLeft)
+        var custom = GestureTuning.preset(.standard, for:.turnLeft); custom.preset = .custom; custom.cooldown = 2.2; custom.angle = 30
+        source.tuning[Gesture.turnLeft.rawValue] = custom
+        var json=try XCTUnwrap(JSONSerialization.jsonObject(with:source.encoded()) as? [String:Any])
+        json["version"]=2; json.removeValue(forKey:"pauseWhileWalking")
+        var tuning=try XCTUnwrap(json["tuning"] as? [String:[String:Any]])
+        for key in tuning.keys { tuning[key]?.removeValue(forKey:"speed") }
+        json["tuning"]=tuning
+        let migrated=try Configuration.decode(JSONSerialization.data(withJSONObject:json))
+        XCTAssertEqual(migrated.version,3); XCTAssertTrue(migrated.pauseWhileWalking)
+        XCTAssertEqual(migrated.tuning[Gesture.tiltLeft.rawValue]?.speed,130)
+        XCTAssertEqual(migrated.tuning[Gesture.turnLeft.rawValue]?.speed,110)
+        XCTAssertEqual(migrated.tuning[Gesture.turnLeft.rawValue]?.cooldown,2.2)
+        XCTAssertEqual(migrated.tuning[Gesture.turnLeft.rawValue]?.angle,30)
+        XCTAssertEqual(migrated.tuning[Gesture.turnLeft.rawValue]?.preset,.custom)
+    }
+    func testPresetSpeeds() {
+        XCTAssertEqual(GestureTuning.preset(.gentle, for:.tiltLeft).speed,60)
+        XCTAssertEqual(GestureTuning.preset(.standard, for:.nod).speed,90)
+        XCTAssertEqual(GestureTuning.preset(.steady, for:.shake).speed,150)
+        var t=GestureTuning.preset(.standard, for:.nod); t.speed=10; XCTAssertFalse(t.isValid)
+    }
     func testInvalidAndNewerConfigurationsRejected() throws {
-        var c=Configuration(); c.version=3; XCTAssertThrowsError(try c.encoded())
+        var c=Configuration(); c.version=4; XCTAssertThrowsError(try c.encoded())
         c=Configuration(); c.tuning[Gesture.nod.rawValue]?.angle = .nan; XCTAssertThrowsError(try c.encoded())
         c=Configuration(); c.bindings.removeValue(forKey:Gesture.nod.rawValue); XCTAssertFalse(c.isValid)
         c=Configuration(); c.set(.init(.shortcut),for:.shake); XCTAssertFalse(c.isValid)
         c=Configuration(); c.set(.init(.shortcut,shortcut:.init(keyCode:200,label:"invalid")),for:.shake); XCTAssertFalse(c.isValid)
         XCTAssertThrowsError(try Configuration.decode(Data("{}".utf8)))
         var json=try XCTUnwrap(JSONSerialization.jsonObject(with:Configuration().encoded()) as? [String:Any])
-        json["version"]=3
+        json["version"]=4
         XCTAssertThrowsError(try Configuration.decode(JSONSerialization.data(withJSONObject:json)))
     }
     func testGlobalPresetHasNoApplicationOrSessionRequirements() {
@@ -190,6 +277,16 @@ final class PresentationTests: XCTestCase {
         var wide = t; wide.neutral = 12
         XCTAssertEqual(ThresholdAdvisor.suggest(peak: 10, tuning: wide), 13)
         XCTAssertTrue({ var x = t; x.angle = ThresholdAdvisor.suggest(peak: 40, tuning: t)!; return x.isValid }())
+    }
+    func testSpeedSuggestionAndPeakDirections() {
+        XCTAssertEqual(ThresholdAdvisor.suggestSpeed(peak: 200), 140)
+        XCTAssertEqual(ThresholdAdvisor.suggestSpeed(peak: 10), 20)
+        XCTAssertEqual(ThresholdAdvisor.suggestSpeed(peak: 900), 300)
+        XCTAssertNil(ThresholdAdvisor.suggestSpeed(peak: .nan))
+        var p = SpeedPeak(); p.record(150); p.record(-60); p.record(.nan)
+        XCTAssertEqual(p.effective(sequence: false), 150); XCTAssertEqual(p.effective(sequence: true), 60)
+        XCTAssertEqual(Gesture.tiltLeft.rate(.init(yaw: 1, pitch: 2, roll: 3)), 3)
+        XCTAssertEqual(Gesture.shake.rate(.init(yaw: 1, pitch: 2, roll: 3)), 1)
     }
     func testCapsAndVirtualKeyboardShortcuts() {
         XCTAssertEqual(Shortcut.rightOption.caps, ["右 ⌥"])

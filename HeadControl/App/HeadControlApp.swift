@@ -11,7 +11,7 @@ import AppKit
     }
 }
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = AppController(store: ConfigurationStore())
     private var settingsWindow: NSWindow?
     private var overlay: OverlayController?
@@ -32,7 +32,6 @@ import AppKit
             let root = SettingsRoot(controller: controller)
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.title = "头势控制"; window.contentMinSize = NSSize(width: 900, height: 660)
-            window.delegate = self
             window.contentViewController = NSHostingController(rootView: root)
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName("HeadControlSettings")
@@ -48,9 +47,6 @@ import AppKit
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
-    func windowWillClose(_ notification: Notification) {
-        if let window = notification.object as? NSWindow, window === settingsWindow { controller.microphone.stop() }
-    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminating else { return .terminateLater }
         terminating = true

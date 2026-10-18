@@ -4,7 +4,6 @@ struct GesturesPage: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: ConfigurationStore
     @State private var selected: Gesture = .tiltLeft
-    @State private var advanced = false
     private var motion: MotionService { controller.motion }
     private func tuning(_ g: Gesture) -> GestureTuning { store.configuration.tuning[g.rawValue] ?? .preset(.standard, for: g) }
 
@@ -14,41 +13,25 @@ struct GesturesPage: View {
                 Card(padding: 0) {
                     HeadOrbView(pose: motion.pose, ghost: ghost, link: motion.link, enabled: controller.enabled)
                         .frame(height: 300).frame(maxWidth: .infinity)
-                        .overlay(alignment: .bottomLeading) { poseReadout.padding(14) }
                         .overlay(alignment: .topLeading) {
                             HStack(spacing: 6) {
-                                Circle().fill(motion.link.tone.color).frame(width: 8, height: 8)
-                                Text(motion.link.title).font(.caption.weight(.medium))
+                                Circle().fill(controller.walkingPaused ? Color.orange : motion.link.tone.color).frame(width: 8, height: 8)
+                                Text(controller.walkingPaused ? "走动中 · 已暂停" : motion.link.title).font(.caption.weight(.medium))
                             }.padding(.horizontal, 10).padding(.vertical, 5).background(.thinMaterial, in: Capsule()).padding(14)
                         }
                 }
                 testCard.frame(width: 300)
             }
-            MotionDataPanel(motion: motion, microphone: controller.microphone)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+            // Top-aligned so only the selected tile grows; its neighbours keep their compact height.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3), spacing: 12) {
                 ForEach(Gesture.allCases) { tile($0) }
             }
-            detail
         }
-        .onDisappear { controller.microphone.stop() }
     }
 
     private var ghost: MotionSample? {
         guard let target = controller.testTarget else { return nil }
         return target.ghostPose(angle: tuning(target).angle)
-    }
-
-    private var poseReadout: some View {
-        HStack(spacing: 14) {
-            ForEach([("转头", motion.pose.yaw), ("点头", motion.pose.pitch), ("歪头", motion.pose.roll)], id: \.0) { name, value in
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(name).font(.caption2).foregroundStyle(.secondary)
-                    Text(motion.tracking ? "\(Int(value.rounded()))°" : "暂无").font(.system(.callout, design: .rounded).weight(.medium)).monospacedDigit()
-                }
-            }
-        }
-        .padding(.horizontal, 12).padding(.vertical, 7).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .opacity(motion.tracking ? 1 : 0.4)
     }
 
     // MARK: Test flow
@@ -77,11 +60,11 @@ struct GesturesPage: View {
                             Text(target.prompt).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    Text("跟着蓝色虚线转，让实线和它重合，最大 \(Int(controller.testPeaks[target] ?? 0))°").font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    Text("跟着蓝色虚线转，让实线和它重合。动作干脆一点更容易识别。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("结束测试") { controller.setTesting(false) }
                 } else {
                     Label("已校准 · \(motion.sensor)", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
-                    Text("逐个做一遍 6 个头势，测完会按你的实际幅度给出建议角度。测试时不会发送按键。")
+                    Text("逐个做一遍 6 个头势，测完会按你的实际动作给出建议。测试时不会发送按键。")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button { controller.startAllTests() } label: { Label("依次测试全部", systemImage: "play.fill").frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).controlSize(.large)
@@ -108,6 +91,7 @@ struct GesturesPage: View {
             HStack(spacing: 6) {
                 GestureGlyph(gesture: g, size: 14).foregroundStyle(Color.accentColor)
                 Text(g.title).font(.callout.weight(.medium))
+                if isSelected { InfoButton(title: g.title, points: helpPoints(g), help: "说明") }
                 Spacer()
                 if controller.testPassed.contains(g) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).transition(.scale)
@@ -115,12 +99,13 @@ struct GesturesPage: View {
             }
             ArcGauge(value: motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
-                     peak: controller.testPeaks[g], suggestion: suggestion,
+                     peak: controller.testPeaks[g], suggestion: suggestion?.angle,
                      lit: controller.testTarget == g)
                 .frame(height: 112)
+            statusLine(g, t)
             HStack {
                 if let suggestion {
-                    Button("采用建议 \(Int(suggestion))°") { controller.applySuggestion(g) }.controlSize(.small).tint(.orange)
+                    Button("采用建议") { controller.applySuggestion(g) }.controlSize(.small).tint(.orange)
                 } else {
                     Text(t.preset.title).font(.caption).foregroundStyle(.secondary)
                 }
@@ -128,15 +113,47 @@ struct GesturesPage: View {
                 Button(controller.testTarget == g ? "测试中…" : "测试") { controller.startTest(g) }
                     .controlSize(.small).disabled(!motion.calibrated || controller.testTarget == g)
             }
+            if isSelected {
+                Divider().padding(.vertical, 4)
+                controls(g)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.06), lineWidth: isSelected ? 2 : 1))
         .contentShape(RoundedRectangle(cornerRadius: 14))
-        .onTapGesture { selected = g }
+        .onTapGesture { withAnimation(.spring(duration: 0.3)) { selected = g } }
+        .opacity(controller.walkingPaused ? 0.6 : 1)
         .flash(on: firing ? controller.lastTrigger?.id : nil, when: firing)
         .animation(.spring(duration: 0.3), value: controller.testPassed)
         .accessibilityElement(children: .contain).accessibilityLabel(g.title)
+    }
+
+    /// The recognizer's actual decision for this gesture, so "reached the gauge" and "fires" never disagree silently.
+    @ViewBuilder private func statusLine(_ g: Gesture, _ t: GestureTuning) -> some View {
+        if motion.calibrated, let st = controller.gestureStatus[g] {
+            let (text, color): (String, Color) = {
+                switch st.phase {
+                case .recenter: return (controller.needsRecenter ? "先回正，才能再次触发" : "回正中…", .secondary)
+                case .cooldown: return ("冷却中", .secondary)
+                case .below: return ("", .secondary)
+                case .mixed: return ("其他方向动作太大，不算\(g.shortTitle)", .orange)
+                case .holding: return (g.isSequence ? "已到位，回正完成动作" : "保持住…", .accentColor)
+                case .tooSlow: return ("动作太慢（\(Int(st.speed ?? 0)) < \(Int(t.speed)) °/s）", .orange)
+                case .fired: return ("已触发", .green)
+                }
+            }()
+            HStack(spacing: 6) {
+                if st.phase == .holding && !g.isSequence {
+                    ProgressView(value: st.progress).progressViewStyle(.linear).frame(width: 50)
+                }
+                Text(text).font(.caption2).foregroundStyle(color).lineLimit(1)
+            }
+            .frame(height: 14)
+        } else {
+            Color.clear.frame(height: 14)
+        }
     }
 
     private func angleBinding(_ g: Gesture) -> Binding<Double> {
@@ -148,61 +165,95 @@ struct GesturesPage: View {
         })
     }
 
-    // MARK: Detail
+    // MARK: Inline controls (selected tile only)
 
-    private var detail: some View {
-        let t = tuning(selected)
-        return Card {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    SectionTitle(title: selected.title, detail: selected.isSequence
-                                 ? "识别完整动作：\(selected == .nod ? "低头再回正" : "左右经过再回正")，超过完成时限不触发。"
-                                 : "越过触发角度并停留一下就触发，回正后才能再次触发。")
-                    Spacer()
-                }
+    private func controls(_ g: Gesture) -> some View {
+        let t = tuning(g)
+        let sound = store.configuration.sound(g)
+        return VStack(alignment: .leading, spacing: 10) {
+            row("灵敏度") {
                 Picker("灵敏度", selection: Binding(get: { t.preset }, set: { value in
-                    if value != .custom { store.configuration.tuning[selected.rawValue] = .preset(value, for: selected) }
+                    if value != .custom { store.configuration.tuning[g.rawValue] = .preset(value, for: g) }
                 })) { ForEach(Sensitivity.allCases) { Text($0.title).tag($0) } }
-                    .pickerStyle(.segmented)
-                DisclosureGroup("高级", isExpanded: $advanced) {
-                    VStack(spacing: 4) {
-                        if !selected.isSequence { TuningSlider(title: "停留时间", value: valueBinding(\.dwell), range: 0.1...1.5, unit: "秒", precision: 2) }
-                        if selected.isSequence { TuningSlider(title: "动作完成时限", value: valueBinding(\.completion), range: 0.35...2, unit: "秒", precision: 2) }
-                        TuningSlider(title: "回正范围（灰色区域）", value: valueBinding(\.neutral), range: 2...min(15, t.angle - 1), unit: "°", precision: 0)
-                        TuningSlider(title: "冷却时间", value: valueBinding(\.cooldown), range: 0.3...3, unit: "秒", precision: 2)
-                        HStack { Spacer(); Button("恢复标准参数") { store.configuration.tuning[selected.rawValue] = .preset(.standard, for: selected) } }
-                    }.padding(.top, 8)
-                }
-                HStack(spacing: 16) {
-                    legend(Color.accentColor, "当前幅度")
-                    legend(Color.secondary.opacity(0.4), "回正区")
-                    legend(Color.orange, "建议角度")
-                    Text("拖动白色圆点调整触发角度。修改后控制会自动暂停。").font(.caption).foregroundStyle(.secondary)
+                    .pickerStyle(.segmented).labelsHidden()
+            }
+            row("速度") { SpeedSlider(value: speedBinding(g), measured: controller.measuredSpeed(for: g)) }
+            row("提醒音") {
+                HStack(spacing: 6) {
+                    Picker("提醒音", selection: Binding(get: { sound }, set: { value in
+                        store.configuration.sounds[g.rawValue] = value
+                        controller.previewSound(value)
+                    })) {
+                        Text("无").tag("")
+                        Divider()
+                        ForEach(AlertSound.names, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    Button { controller.previewSound(sound) } label: {
+                        Image(systemName: store.configuration.sound ? "speaker.wave.2.fill" : "speaker.slash")
+                    }
+                    .buttonStyle(.borderless).disabled(sound.isEmpty)
+                    .help(store.configuration.sound ? "试听" : "提示音已在“通用”中关闭")
+                    .accessibilityLabel("试听提醒音")
                 }
             }
         }
+        .controlSize(.small)
     }
-    private func legend(_ color: Color, _ text: String) -> some View {
-        HStack(spacing: 5) { Capsule().fill(color).frame(width: 14, height: 5); Text(text).font(.caption).foregroundStyle(.secondary) }
+    private func row<C: View>(_ label: String, @ViewBuilder _ content: () -> C) -> some View {
+        HStack(spacing: 8) {
+            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 40, alignment: .leading)
+            content()
+        }
     }
-    private func valueBinding(_ key: WritableKeyPath<GestureTuning, Double>) -> Binding<Double> {
-        Binding(get: { tuning(selected)[keyPath: key] }, set: { value in
-            var t = tuning(selected); t[keyPath: key] = value; t.neutral = min(t.neutral, t.angle - 1); t.preset = .custom
-            store.configuration.tuning[selected.rawValue] = t
+    private func helpPoints(_ g: Gesture) -> [(String, String)] {
+        [("hand.draw", g.isSequence
+            ? "做一个完整的\(g == .nod ? "低头再抬起" : "左右摇头再回正")，太慢不会触发。"
+            : "歪到圆点的位置并停一下就触发，回正后才能再次触发。"),
+         ("circle.circle", "拖动白色圆点调整动作幅度。蓝色是当前幅度，灰色是回正区，橙色是测试后的建议位置。"),
+         ("gauge.with.needle", "速度越靠右，只有越干脆的动作才会触发；橙点是你上次测试的速度。"),
+         ("speaker.wave.2", "每完成一次这个头势都会播放所选提醒音。"),
+         ("pause.circle", "修改参数后头势控制会自动暂停。")]
+    }
+    private func speedBinding(_ g: Gesture) -> Binding<Double> {
+        Binding(get: { tuning(g).speed }, set: { value in
+            var t = tuning(g)
+            let rounded = (value / 5).rounded() * 5
+            guard t.speed != rounded else { return }
+            t.speed = rounded; t.preset = .custom
+            store.configuration.tuning[g.rawValue] = t
         })
     }
 }
 
-struct TuningSlider: View {
-    let title: String
+/// Unitless speed requirement: slow movements also count ↔ only brisk movements count.
+/// An orange tick shows how fast the user's last test movement was, so they can drag relative to it.
+struct SpeedSlider: View {
     @Binding var value: Double
-    let range: ClosedRange<Double>
-    let unit: String
-    let precision: Int
+    let measured: Double?
+    private let range = GestureTuning.speedRange
     var body: some View {
-        VStack(spacing: 4) {
-            HStack { Text(title); Spacer(); Text("\(value, specifier: precision == 0 ? "%.0f" : "%.2f") \(unit)").monospacedDigit().foregroundStyle(.secondary) }
-            Slider(value: $value, in: range).accessibilityLabel(title).accessibilityValue("\(value) \(unit)")
-        }.padding(.vertical, 3)
+        HStack(spacing: 6) {
+            Text("慢").font(.caption2).foregroundStyle(.secondary)
+            Slider(value: $value, in: range) { Text("动作速度") }
+                .labelsHidden()
+                .overlay { GeometryReader { geo in marker(in: geo.size.width) } }
+                .accessibilityValue(description)
+                .help(description)
+            Text("快").font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+    private var fraction: Double { (value - range.lowerBound) / (range.upperBound - range.lowerBound) }
+    private var description: String {
+        fraction < 0.2 ? "慢慢转头也会触发" : fraction < 0.5 ? "正常速度的动作会触发" : "只有干脆的动作才会触发"
+    }
+    @ViewBuilder private func marker(in width: CGFloat) -> some View {
+        if let measured {
+            // Approximate inset of the small slider's thumb radius.
+            let inset: CGFloat = 8, track = max(0, width - inset * 2)
+            let f = min(1, max(0, (measured - range.lowerBound) / (range.upperBound - range.lowerBound)))
+            Circle().fill(Color.orange).frame(width: 6, height: 6)
+                .position(x: inset + track * f, y: -1).allowsHitTesting(false)
+        }
     }
 }

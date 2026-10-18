@@ -36,12 +36,13 @@ struct SectionTitle: View {
 struct InfoButton: View {
     let title: String
     let points: [(String, String)]
+    var help = "为什么需要？"
     @State private var shown = false
     var body: some View {
         Button { shown.toggle() } label: {
             Image(systemName: "questionmark.circle").font(.system(size: 15)).foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain).help("为什么需要？").accessibilityLabel("为什么需要\(title)")
+        .buttonStyle(.plain).help(help).accessibilityLabel("\(help) \(title)")
         .popover(isPresented: $shown, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 12) {
                 Text(title).font(.headline)

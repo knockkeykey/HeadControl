@@ -40,17 +40,16 @@ struct ArcGauge: View {
                         guard editable else { return }
                         if let v = degrees(at: drag.location, center: center) { threshold = min(50, max(max(8, neutral + 1), v.rounded())) }
                     })
-                    .accessibilityElement().accessibilityLabel("触发角度")
-                    .accessibilityValue("\(Int(threshold)) 度")
+                    .accessibilityElement().accessibilityLabel("动作幅度")
+                    .accessibilityValue("\(Int(threshold * 100 / Self.span))%")
                     .accessibilityAdjustableAction { dir in
                         guard editable else { return }
                         threshold = min(50, max(max(8, neutral + 1), threshold + (dir == .increment ? 1 : -1)))
                     }
-                VStack(spacing: 0) {
-                    Text("\(Int(max(0, value).rounded()))°").font(.system(size: size * 0.2, weight: .semibold, design: .rounded)).monospacedDigit()
-                        .foregroundStyle(over || lit ? Color.green : Color.primary).contentTransition(.numericText())
-                    Text("触发 \(Int(threshold))°").font(.system(size: max(10, size * 0.085))).foregroundStyle(.secondary)
-                }.offset(y: size * 0.03)
+                Image(systemName: over || lit ? "checkmark.circle.fill" : "circle.dashed")
+                    .font(.system(size: size * 0.2, weight: .medium))
+                    .foregroundStyle(over || lit ? Color.green : Color.secondary.opacity(0.5))
+                    .contentTransition(.symbolEffect(.replace)).offset(y: size * 0.03)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .coordinateSpace(name: "gauge")
