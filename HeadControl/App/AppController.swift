@@ -29,8 +29,6 @@ struct Trigger: Equatable {
     @Published private(set) var testingAll = false
     /// The recognizer's own verdict per gesture, refreshed from every calibrated sample.
     @Published private(set) var gestureStatus: [Gesture: GestureStatus] = [:]
-    /// True while the head is too far from center for any gesture to arm.
-    @Published private(set) var needsRecenter = false
     /// Why the last attempt did not fire, shown in the HUD so real use explains itself like the test page.
     @Published private(set) var blockedHint: String?
     @Published var showDockIcon = UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true {
@@ -57,8 +55,8 @@ struct Trigger: Equatable {
         self.store = store
         store.onChange = { [weak self] in
             guard let self else { return }
-            self.router.configurationChanged(); self.enabled = false; self.keys.release()
-            self.notice = self.testing ? "设置已更新，可以继续测试" : "设置已更新，头势控制已暂停"
+            // New settings apply to the next gesture; control stays on.
+            self.router.configurationChanged(); self.keys.release()
             self.overlayChanged?()
         }
         motion.onSample = { [weak self] sample in self?.receive(sample) }
@@ -95,7 +93,7 @@ struct Trigger: Equatable {
         guard motion.tracking, motion.calibrated else { notice = "请先连接耳机并校准正前方"; return }
         guard keys.canPost else { notice = "请先在“权限”页授予辅助功能"; return }
         stopTest(); testing = false; enabled = true; router.setMode(.active)
-        notice = "已开启：回正后做头势，会点按对应快捷键"
+        notice = "已开启：做头势会点按对应快捷键"
         overlayChanged?()
     }
     func setTesting(_ value: Bool) {
@@ -156,7 +154,7 @@ struct Trigger: Equatable {
         }
         if walkingPaused {
             // Drop any half-finished gesture so stopping mid-step cannot complete it.
-            if !suspended { suspended = true; router.setMode(.paused); gestureStatus = [:]; needsRecenter = false; overlayChanged?() }
+            if !suspended { suspended = true; router.setMode(.paused); gestureStatus = [:]; overlayChanged?() }
             return
         }
         if suspended { suspended = false; router.setMode(testing ? .testing : .active); overlayChanged?() }
@@ -215,8 +213,6 @@ struct Trigger: Equatable {
             }
         }
         if next != gestureStatus { gestureStatus = next }
-        let recenter = next.values.contains { $0.phase == .recenter } && router.offCenter > router.rearmLimit
-        if recenter != needsRecenter { needsRecenter = recenter }
     }
     private func showPreview(_ route: GestureRouter.Route) {
         let binding = route.binding
@@ -237,7 +233,7 @@ struct Trigger: Equatable {
     }
     private func pause(_ reason: String) {
         enabled = false; testing = false; suspended = false; stopTest(); router.setMode(.paused); keys.release()
-        gestureStatus = [:]; needsRecenter = false; blockedHint = nil
+        gestureStatus = [:]; blockedHint = nil
         notice = reason; overlayChanged?()
     }
     private func playSound(for gesture: Gesture) {

@@ -100,11 +100,11 @@ struct GesturesPage: View {
             ArcGauge(value: motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
                      peak: controller.testPeaks[g], suggestion: suggestion?.angle,
-                     lit: controller.testTarget == g)
+                     lit: controller.testTarget == g, ready: ready(g))
                 .frame(height: 112)
             statusLine(g, t)
             HStack {
-                if let suggestion {
+                if suggestion != nil {
                     Button("采用建议") { controller.applySuggestion(g) }.controlSize(.small).tint(.orange)
                 } else {
                     Text(t.preset.title).font(.caption).foregroundStyle(.secondary)
@@ -116,7 +116,7 @@ struct GesturesPage: View {
             if isSelected {
                 Divider().padding(.vertical, 4)
                 controls(g)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.opacity)
             }
         }
         .padding(12)
@@ -130,12 +130,18 @@ struct GesturesPage: View {
         .accessibilityElement(children: .contain).accessibilityLabel(g.title)
     }
 
+    /// Green only when the recognizer would actually accept this gesture right now, not merely when the angle is past the knob.
+    private func ready(_ g: Gesture) -> Bool {
+        guard let phase = controller.gestureStatus[g]?.phase else { return false }
+        return phase == .holding || phase == .fired
+    }
+
     /// The recognizer's actual decision for this gesture, so "reached the gauge" and "fires" never disagree silently.
     @ViewBuilder private func statusLine(_ g: Gesture, _ t: GestureTuning) -> some View {
         if motion.calibrated, let st = controller.gestureStatus[g] {
             let (text, color): (String, Color) = {
                 switch st.phase {
-                case .recenter: return (controller.needsRecenter ? "先回正，才能再次触发" : "回正中…", .secondary)
+                case .release: return ("稍微收回一点，才能再次触发", .secondary)
                 case .cooldown: return ("冷却中", .secondary)
                 case .below: return ("", .secondary)
                 case .mixed: return ("其他方向动作太大，不算\(g.shortTitle)", .orange)
@@ -209,7 +215,7 @@ struct GesturesPage: View {
     private func helpPoints(_ g: Gesture) -> [(String, String)] {
         [("hand.draw", g.isSequence
             ? "做一个完整的\(g == .nod ? "低头再抬起" : "左右摇头再回正")，太慢不会触发。"
-            : "歪到圆点的位置并停一下就触发，回正后才能再次触发。"),
+            : "歪到圆点的位置并停一下就触发，稍微收回一点就能再次触发。"),
          ("circle.circle", "拖动白色圆点调整动作幅度。蓝色是当前幅度，灰色是回正区，橙色是测试后的建议位置。"),
          ("gauge.with.needle", "速度越靠右，只有越干脆的动作才会触发；橙点是你上次测试的速度。"),
          ("speaker.wave.2", "每完成一次这个头势都会播放所选提醒音。"),

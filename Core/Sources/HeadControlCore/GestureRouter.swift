@@ -16,12 +16,9 @@ public struct GestureRouter: Sendable {
     public mutating func setMode(_ value: Mode) {
         mode = value; revision += 1; recognizer.reset()
     }
-    public mutating func configurationChanged() {
-        setMode(mode == .testing ? .testing : .paused)
-    }
+    /// Drops half-finished gestures and in-flight routes, but keeps the current mode: editing a setting does not pause control.
+    public mutating func configurationChanged() { setMode(mode) }
     public var status: [Gesture: GestureStatus] { recognizer.status }
-    public var offCenter: Double { recognizer.offCenter }
-    public var rearmLimit: Double { recognizer.rearmLimit }
     public func preview(_ gesture: Gesture, configuration: Configuration) -> Route? {
         guard mode == .testing else { return nil }
         return Route(gesture:gesture,binding:configuration.binding(gesture),executes:false,revision:revision)

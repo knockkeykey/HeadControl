@@ -30,6 +30,7 @@ import ApplicationServices
         down.setIntegerValueField(.eventSourceUserData, value: 0x48454144)
         held = (shortcut.keyCode,physical.intersection(.maskAlphaShift))
         ownedFlags = flags.rawValue & ~CGEventFlags.maskAlphaShift.rawValue
+        // Input methods such as WeType watch right Option at HID level; a session post bypasses them.
         down.post(tap: .cghidEventTap)
         // A short real click, with guaranteed release even if the task is cancelled.
         try await Task.sleep(for:.milliseconds(45))

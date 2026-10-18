@@ -143,12 +143,11 @@ struct FlashModifier: ViewModifier {
     let trigger: UUID?
     let active: Bool
     var color: Color = .green
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var lit = false
+    /// Only the border flashes: scaling the content would resize hosted AppKit controls mid-animation and spam layout warnings.
     func body(content: Content) -> some View {
         content
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(color, lineWidth: 2).opacity(lit ? 1 : 0))
-            .scaleEffect(lit && !reduceMotion ? 1.02 : 1)
             .onChange(of: trigger) { _, _ in
                 guard active else { return }
                 withAnimation(.spring(duration: 0.18)) { lit = true }

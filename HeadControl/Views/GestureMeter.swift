@@ -10,6 +10,8 @@ struct ArcGauge: View {
     var suggestion: Double? = nil
     var editable = true
     var lit = false
+    /// The recognizer is accepting this gesture right now; past the knob without it means blocked (cooldown, mixed, too slow…).
+    var ready = false
     static let span = 60.0
     private let sweep = 240.0, start = 150.0
 
@@ -20,11 +22,12 @@ struct ArcGauge: View {
             let radius = size / 2 - line
             let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
             let over = value >= threshold
+            let good = ready || lit
             ZStack {
                 arc(0, Self.span).stroke(Color.secondary.opacity(0.14), style: StrokeStyle(lineWidth: line, lineCap: .round))
                 arc(0, neutral).stroke(Color.secondary.opacity(0.32), style: StrokeStyle(lineWidth: line, lineCap: .round))
                 arc(threshold, Self.span).stroke(Color.accentColor.opacity(0.14), style: StrokeStyle(lineWidth: line, lineCap: .butt))
-                arc(0, max(0, value)).stroke(over || lit ? Color.green : Color.accentColor, style: StrokeStyle(lineWidth: line, lineCap: .round))
+                arc(0, max(0, value)).stroke(good ? Color.green : over ? Color.orange : Color.accentColor, style: StrokeStyle(lineWidth: line, lineCap: .round))
                     .animation(.linear(duration: 0.08), value: value)
                 if let peak, peak > 0 {
                     tick(peak).stroke(Color.primary.opacity(0.5), lineWidth: 1.5)
@@ -46,9 +49,9 @@ struct ArcGauge: View {
                         guard editable else { return }
                         threshold = min(50, max(max(8, neutral + 1), threshold + (dir == .increment ? 1 : -1)))
                     }
-                Image(systemName: over || lit ? "checkmark.circle.fill" : "circle.dashed")
+                Image(systemName: good ? "checkmark.circle.fill" : over ? "exclamationmark.circle.fill" : "circle.dashed")
                     .font(.system(size: size * 0.2, weight: .medium))
-                    .foregroundStyle(over || lit ? Color.green : Color.secondary.opacity(0.5))
+                    .foregroundStyle(good ? Color.green : over ? Color.orange : Color.secondary.opacity(0.5))
                     .contentTransition(.symbolEffect(.replace)).offset(y: size * 0.03)
             }
             .frame(width: geo.size.width, height: geo.size.height)

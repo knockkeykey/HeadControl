@@ -3,8 +3,8 @@ import Foundation
 /// What the recognizer currently thinks of one gesture, so the UI shows the real decision, not a guess.
 public struct GestureStatus: Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
-        /// Not armed: the head has to come back inside the re-arm range first.
-        case recenter
+        /// Just fired (or timed out): ease back a little on this axis before it can fire again.
+        case release
         case cooldown
         /// Armed, but the angle is below the trigger point.
         case below
@@ -25,12 +25,13 @@ public struct GestureStatus: Equatable, Sendable {
 }
 
 /// Timestamp-driven recognizer, independent of sensor sample rate and UI refresh.
+/// There is no global "return to center" gate: a gesture can start from any pose. A fired (or
+/// timed-out) gesture only has to ease back on its own axis before it can fire again.
 public struct GestureRecognizer: Sendable {
     private var lastTime: Double?
-    private var neutralSince: Double?
-    private var armed = false
-    private var rearmRange: Double = 7
     private var nextAllowed = -Double.infinity
+    /// Gestures that fired or timed out and are waiting for their own axis to ease back.
+    private var latched: Set<Gesture> = []
     private var candidates: [Gesture: Double] = [:]
     private var nodSince: Double?
     private var shakeSince: Double?
@@ -39,11 +40,13 @@ public struct GestureRecognizer: Sendable {
     /// Recent angular velocity, long enough to cover the slowest allowed nod or shake.
     private var history: [(time: Double, rate: AxisRates)] = []
     public private(set) var status: [Gesture: GestureStatus] = [:]
-    /// Largest angle on any axis in the last sample; arming needs it within `rearmLimit`.
-    public private(set) var offCenter: Double = 0
-    public var rearmLimit: Double { rearmRange }
     public init() {}
     public mutating func reset() { self = Self() }
+
+    /// Easing back to 70% of the trigger angle re-allows a gesture; nod and shake finish inside neutral anyway.
+    static func release(_ t: GestureTuning) -> Double { max(t.neutral, t.angle * 0.7) }
+    /// Once a hold has started, natural jitter around the trigger angle should not restart the dwell timer.
+    static func hold(_ t: GestureTuning) -> Double { max(release(t), t.angle * 0.8) }
 
     public mutating func update(_ s: MotionSample, tuning: [String: GestureTuning]) -> Gesture? {
         let fired = step(s, tuning: tuning)
@@ -53,41 +56,34 @@ public struct GestureRecognizer: Sendable {
 
     private mutating func step(_ s: MotionSample, tuning: [String: GestureTuning]) -> Gesture? {
         guard s.finite else { reset(); return nil }
-        if let last = lastTime, s.time <= last || s.time - last > 0.4 { reset() }
+        let fresh = lastTime == nil || s.time <= lastTime! || s.time - lastTime! > 0.4
+        if fresh { reset() }
         lastTime = s.time
         if let rate = s.rate {
             history.append((s.time, rate))
             if let keep = history.firstIndex(where: { $0.time >= s.time - 2.5 }), keep > 0 { history.removeFirst(keep) }
         }
         func t(_ g: Gesture) -> GestureTuning { tuning[g.rawValue] ?? .preset(.standard, for: g) }
-        let magnitude = max(abs(s.yaw),abs(s.pitch),abs(s.roll))
-        let neutral = magnitude <= rearmRange
+        // A pose already held when tracking (re)starts is not a fresh movement.
+        if fresh { latched = Set(Gesture.allCases.filter { $0.travel(s) > Self.release(t($0)) }) }
+        latched = latched.filter { $0.travel(s) > Self.release(t($0)) }
 
-        if let start = nodSince, s.time - start > t(.nod).completion { nodSince = nil; armed = false }
-        if let start = shakeSince, s.time - start > t(.shake).completion { shakeSince = nil; shakeOpposite = false; armed = false }
+        if let start = nodSince, s.time - start > t(.nod).completion { nodSince = nil; latched.insert(.nod) }
+        if let start = shakeSince, s.time - start > t(.shake).completion { shakeSince = nil; shakeOpposite = false; latched.insert(.shake) }
+        guard s.time >= nextAllowed else { candidates.removeAll(); nodSince = nil; shakeSince = nil; shakeOpposite = false; return nil }
 
-        if armed {
-            if magnitude <= t(.nod).neutral, let start = nodSince, s.time - start >= 0.18, s.time - start <= t(.nod).completion, fastEnough(.nod, t(.nod), since: start) {
-                return emit(.nod, time: s.time, tuning: t(.nod))
-            }
-            if magnitude <= t(.shake).neutral, let start = shakeSince, shakeOpposite, s.time - start >= 0.25, s.time - start <= t(.shake).completion, fastEnough(.shake, t(.shake), since: start) {
-                return emit(.shake, time: s.time, tuning: t(.shake))
-            }
+        if abs(s.pitch) <= t(.nod).neutral, let start = nodSince, s.time - start >= 0.18, fastEnough(.nod, t(.nod), since: start) {
+            return emit(.nod, time: s.time, tuning: t(.nod))
         }
-        if neutral {
-            if neutralSince == nil { neutralSince = s.time }
-            if s.time - (neutralSince ?? s.time) >= 0.18 && s.time >= nextAllowed { armed = true }
-            candidates.removeAll()
-            return nil
+        if abs(s.yaw) <= t(.shake).neutral, let start = shakeSince, shakeOpposite, s.time - start >= 0.25, fastEnough(.shake, t(.shake), since: start) {
+            return emit(.shake, time: s.time, tuning: t(.shake))
         }
-        neutralSince = nil
-        guard armed, s.time >= nextAllowed else { return nil }
 
         // Require the intended axis to dominate; a combined diagonal movement is not two gestures.
-        if -s.pitch >= t(.nod).angle && abs(s.pitch) > max(abs(s.yaw),abs(s.roll)) * 1.25 {
+        if !latched.contains(.nod), -s.pitch >= t(.nod).angle && abs(s.pitch) > max(abs(s.yaw),abs(s.roll)) * 1.25 {
             if nodSince == nil { nodSince = s.time }
         }
-        if abs(s.yaw) >= t(.shake).angle && abs(s.yaw) > max(abs(s.pitch),abs(s.roll)) * 1.25 {
+        if !latched.contains(.shake), abs(s.yaw) >= t(.shake).angle && abs(s.yaw) > max(abs(s.pitch),abs(s.roll)) * 1.25 {
             let sign = s.yaw > 0 ? 1.0 : -1.0
             if shakeSince == nil { shakeSince = s.time; shakeSign = sign; shakeOpposite = false }
             else if sign != shakeSign { shakeOpposite = true }
@@ -98,7 +94,10 @@ public struct GestureRecognizer: Sendable {
             (.turnLeft,-s.yaw,max(abs(s.pitch),abs(s.roll))), (.turnRight,s.yaw,max(abs(s.pitch),abs(s.roll)))
         ]
         for (g,value,other) in values {
-            if value >= t(g).angle && value > other * 1.25 {
+            // Crossing the dot needs a clear, dominant tilt; staying in it only needs to remain near it and lead the other axes.
+            let holding = candidates[g] != nil
+            let inside = holding ? value >= Self.hold(t(g)) && value > other : value >= t(g).angle && value > other * 1.25
+            if !latched.contains(g), inside {
                 if candidates[g] == nil { candidates[g] = s.time }
                 let since = candidates[g] ?? s.time
                 if s.time - since >= t(g).dwell, fastEnough(g, t(g), since: since) { return emit(g,time:s.time,tuning:t(g)) }
@@ -122,25 +121,24 @@ public struct GestureRecognizer: Sendable {
     /// Derived purely from the state `step` left behind, using the same conditions it checks.
     private mutating func describe(_ s: MotionSample, tuning: [String: GestureTuning], fired: Gesture?) {
         func t(_ g: Gesture) -> GestureTuning { tuning[g.rawValue] ?? .preset(.standard, for: g) }
-        let magnitude = max(abs(s.yaw),abs(s.pitch),abs(s.roll))
-        offCenter = magnitude
         var next: [Gesture: GestureStatus] = [:]
         for g in Gesture.allCases {
             let tg = t(g)
             if g == fired { next[g] = GestureStatus(phase: .fired, progress: 1); continue }
-            if fired != nil || !armed { next[g] = GestureStatus(phase: s.time < nextAllowed ? .cooldown : .recenter); continue }
+            if fired != nil || s.time < nextAllowed { next[g] = GestureStatus(phase: .cooldown); continue }
+            if latched.contains(g) { next[g] = GestureStatus(phase: .release); continue }
             let reached = g.travel(s) >= tg.angle
             switch g {
             case .nod:
                 if let start = nodSince {
                     let speed = measuredSpeed(g, since: start)
-                    let returned = magnitude <= tg.neutral && s.time - start >= 0.18
+                    let returned = abs(s.pitch) <= tg.neutral && s.time - start >= 0.18
                     next[g] = GestureStatus(phase: returned ? .tooSlow : .holding, progress: 0.5, speed: speed)
                 } else { next[g] = GestureStatus(phase: reached ? .mixed : .below) }
             case .shake:
                 if let start = shakeSince {
                     let speed = measuredSpeed(g, since: start)
-                    let returned = shakeOpposite && magnitude <= tg.neutral && s.time - start >= 0.25
+                    let returned = shakeOpposite && abs(s.yaw) <= tg.neutral && s.time - start >= 0.25
                     next[g] = GestureStatus(phase: returned ? .tooSlow : .holding, progress: shakeOpposite ? 0.66 : 0.33, speed: speed)
                 } else { next[g] = GestureStatus(phase: reached ? .mixed : .below) }
             default:
@@ -154,9 +152,8 @@ public struct GestureRecognizer: Sendable {
     }
 
     private mutating func emit(_ g: Gesture, time: Double, tuning: GestureTuning) -> Gesture {
-        armed = false; nextAllowed = time + tuning.cooldown
-        rearmRange = tuning.neutral
-        neutralSince = nil; candidates.removeAll(); nodSince = nil; shakeSince = nil; shakeOpposite = false
+        nextAllowed = time + tuning.cooldown; latched.insert(g)
+        candidates.removeAll(); nodSince = nil; shakeSince = nil; shakeOpposite = false
         return g
     }
 }

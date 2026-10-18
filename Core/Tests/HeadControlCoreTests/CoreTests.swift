@@ -20,7 +20,28 @@ final class GestureTests: XCTestCase {
         feed(0.3); feed(2,roll:-24); XCTAssertEqual(seen,[.tiltLeft])
         feed(0.3); feed(0.5,roll:-24); XCTAssertEqual(seen,[.tiltLeft,.tiltLeft])
     }
+    func testNoFullRecenterNeeded() {
+        // Starting off-center on other axes (drifted yaw, slight head-down) still fires.
+        feed(0.3,yaw:10,pitch:-8); feed(0.6,yaw:10,pitch:-8,roll:-30); XCTAssertEqual(seen,[.tiltLeft])
+        // Easing back only part way (below 70% of the trigger angle) re-allows it.
+        feed(1,roll:-11); feed(0.6,roll:-24); XCTAssertEqual(seen,[.tiltLeft,.tiltLeft])
+        // Staying past the release point does not repeat.
+        feed(0.3,roll:-17); feed(1,roll:-26); XCTAssertEqual(seen,[.tiltLeft,.tiltLeft])
+    }
     func testShortTiltDoesNotTrigger() { feed(0.3); feed(0.12,roll:-24); feed(0.4); XCTAssertTrue(seen.isEmpty) }
+    func testJitterAroundTriggerAngleKeepsHolding() {
+        // Hovering at the dot (18°) dips just below it every other sample; the hold must not restart.
+        feed(0.3)
+        for i in 0..<20 { feed(0.02, roll: i % 2 == 0 ? -18.5 : -16) }
+        XCTAssertEqual(seen,[.tiltLeft])
+    }
+    func testOtherAxisCreepDuringHoldStillFires() {
+        // Entering cleanly, then a little head-down creeps in while holding.
+        feed(0.3); feed(0.06,roll:-20); feed(0.4,pitch:-17,roll:-20); XCTAssertEqual(seen,[.tiltLeft])
+    }
+    func testLeavingTheHoldZoneStillCancels() {
+        feed(0.3); feed(0.2,roll:-20); feed(0.04,roll:-12); feed(0.2,roll:-20); XCTAssertTrue(seen.isEmpty)
+    }
     func testNodMustReturnWithinWindow() {
         feed(0.3); feed(0.24,pitch:-25); XCTAssertTrue(seen.isEmpty); feed(0.1); XCTAssertEqual(seen,[.nod])
     }
@@ -86,7 +107,7 @@ final class GestureTests: XCTestCase {
         XCTAssertEqual(recognizer.status[.tiltLeft]?.phase, .mixed)
         recognizer.reset(); time += 1
         feed(0.5,roll:-30)
-        XCTAssertEqual(recognizer.status[.tiltLeft]?.phase, .recenter)
+        XCTAssertEqual(recognizer.status[.tiltLeft]?.phase, .release)
     }
     func testStatusFiredMatchesEmittedGesture() {
         feed(0.3); feed(0.6,roll:-24)
@@ -208,12 +229,13 @@ final class RoutingTests: XCTestCase {
         router.setMode(.active); XCTAssertFalse(router.accepts(route))
         XCTAssertTrue(feed(0.8,roll:-25).isEmpty)
     }
-    func testEditingMappingDiscardsPartialGestureAndPausesExecution() {
+    func testEditingMappingDiscardsPartialGestureButKeepsControlOn() {
         router.setMode(.active); _=feed(0.3); _=feed(0.22,pitch:-25)
+        let old=router.revision
         configuration.set(.init(.shortcut,shortcut:.init(keyCode:49,label:"空格")),for:.nod)
-        router.configurationChanged(); XCTAssertEqual(router.mode,.paused)
+        router.configurationChanged(); XCTAssertEqual(router.mode,.active); XCTAssertNotEqual(router.revision,old)
         XCTAssertTrue(feed(0.5).isEmpty)
-        router.setMode(.active); _=feed(0.3); _=feed(0.24,pitch:-25)
+        _=feed(0.3); _=feed(0.24,pitch:-25)
         let routes=feed(0.1); XCTAssertEqual(routes.count,1); XCTAssertEqual(routes[0].binding.shortcut?.keyCode,49)
     }
     func testDisabledNeverAuthorizesAndTestingCanContinueAfterEdit() {
