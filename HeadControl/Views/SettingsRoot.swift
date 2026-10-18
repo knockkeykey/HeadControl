@@ -117,6 +117,9 @@ struct StatusPage: View {
                 Card {
                     VStack(alignment: .leading, spacing: 12) {
                         SectionTitle(title: "最近一次")
+                        HeadOrbView(pose: motion.pose, link: motion.link, enabled: controller.enabled)
+                            .frame(height: 170).frame(maxWidth: .infinity)
+                            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         LastTriggerView(trigger: controller.lastTrigger)
                         Divider()
                         if controller.events.isEmpty { Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary) }

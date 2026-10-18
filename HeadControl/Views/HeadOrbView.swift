@@ -54,8 +54,8 @@ final class HeadOrbScene {
 
     init() {
         orb.lightingModel = .physicallyBased
-        orb.roughness.contents = 0.62; orb.metalness.contents = 0.0
-        orb.clearCoat.contents = 0.08; orb.clearCoatRoughness.contents = 0.5
+        // Matte, no clear coat: a glossy finish catches the rim light as a hot spot on the upper-left edge.
+        orb.roughness.contents = 0.78; orb.metalness.contents = 0.0
         let ball = SCNSphere(radius: 1); ball.segmentCount = 128; ball.firstMaterial = orb
         pivot.addChildNode(SCNNode(geometry: ball))
 
@@ -87,8 +87,8 @@ final class HeadOrbScene {
         }
         key = light(.directional, 1050, euler: SCNVector3(-0.75, 0.45, 0))   // key: above, camera side, right
         light(.directional, 380, euler: SCNVector3(-0.2, -1.1, 0))     // fill: low left
-        light(.directional, 1400, euler: SCNVector3(-0.5, .pi + 0.6, 0)) // rim: from the far side
-        light(.ambient, 300)
+        light(.directional, 320, euler: SCNVector3(-0.5, .pi + 0.6, 0)) // rim: from the far side, kept soft
+        light(.ambient, 380)
     }
 
     func apply(pitch: Double, yaw: Double, roll: Double, ghost: (Double, Double, Double)?, status: Status, dark: Bool, animated: Bool = true) {
