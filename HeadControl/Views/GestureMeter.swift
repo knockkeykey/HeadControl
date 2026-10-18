@@ -17,10 +17,9 @@ struct ArcGauge: View {
 
     var body: some View {
         GeometryReader { geo in
-            let size = min(geo.size.width, geo.size.height)
-            let line = size * 0.09
-            let radius = size / 2 - line
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            let layout = GaugeLayout(CGRect(origin: .zero, size: geo.size))
+            let size = layout.radius * 2, line = layout.line
+            let radius = layout.radius, center = layout.center
             let over = value >= threshold
             let good = ready || lit
             ZStack {
@@ -52,13 +51,13 @@ struct ArcGauge: View {
                 Image(systemName: good ? "checkmark.circle.fill" : over ? "exclamationmark.circle.fill" : "circle.dashed")
                     .font(.system(size: size * 0.2, weight: .medium))
                     .foregroundStyle(good ? Color.green : over ? Color.orange : Color.secondary.opacity(0.5))
-                    .contentTransition(.symbolEffect(.replace)).offset(y: size * 0.03)
+                    .contentTransition(.symbolEffect(.replace)).position(center)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .coordinateSpace(name: "gauge")
             .scaleEffect(lit ? 1.04 : 1).animation(.spring(duration: 0.25), value: lit)
         }
-        .aspectRatio(1.15, contentMode: .fit)
+        .aspectRatio(GaugeLayout.aspect, contentMode: .fit)
     }
 
     private func angle(_ v: Double) -> Angle { .degrees(start + sweep * min(max(v, 0), Self.span) / Self.span) }
@@ -76,12 +75,25 @@ struct ArcGauge: View {
     }
 }
 
+/// Fits the 240° arc itself, not its full circle, so no blank band is left below the open end.
+private struct GaugeLayout {
+    /// Arc spans y ∈ [-r, r·sin30°]; pad by the knob (0.144 r) on every side.
+    static let pad = 0.16, aspect = (2 + pad * 2) / (1.5 + pad * 2)
+    let radius: CGFloat, line: CGFloat, center: CGPoint
+    init(_ rect: CGRect) {
+        radius = min(rect.width / (2 + Self.pad * 2), rect.height / (1.5 + Self.pad * 2))
+        line = radius * 0.2
+        let height = radius * (1.5 + Self.pad * 2)
+        center = CGPoint(x: rect.midX, y: rect.midY - height / 2 + radius * (1 + Self.pad))
+    }
+}
+
 private struct GaugeArc: Shape {
     let from: Angle, to: Angle
     func path(in rect: CGRect) -> Path {
-        let line = min(rect.width, rect.height) * 0.09
+        let l = GaugeLayout(rect)
         var p = Path()
-        p.addArc(center: CGPoint(x: rect.midX, y: rect.midY), radius: min(rect.width, rect.height) / 2 - line, startAngle: from, endAngle: to, clockwise: false)
+        p.addArc(center: l.center, radius: l.radius, startAngle: from, endAngle: to, clockwise: false)
         return p
     }
 }
@@ -89,8 +101,8 @@ private struct GaugeTick: Shape {
     let angle: Angle
     let extra: CGFloat
     func path(in rect: CGRect) -> Path {
-        let size = min(rect.width, rect.height), line = size * 0.09, r = size / 2 - line
-        let c = CGPoint(x: rect.midX, y: rect.midY), a = CGFloat(angle.radians)
+        let l = GaugeLayout(rect), line = l.line, r = l.radius
+        let c = l.center, a = CGFloat(angle.radians)
         var p = Path()
         p.move(to: CGPoint(x: c.x + cos(a) * (r - line * extra / 2), y: c.y + sin(a) * (r - line * extra / 2)))
         p.addLine(to: CGPoint(x: c.x + cos(a) * (r + line * extra / 2), y: c.y + sin(a) * (r + line * extra / 2)))

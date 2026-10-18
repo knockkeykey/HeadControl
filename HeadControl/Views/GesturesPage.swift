@@ -10,15 +10,6 @@ struct GesturesPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            if let gesture = recording {
-                Card {
-                    ShortcutRecorderPanel(gesture: gesture, save: { shortcut in
-                        store.configuration.set(GestureBinding(.shortcut, shortcut: shortcut), for: gesture)
-                        withAnimation(.spring(duration: 0.35)) { recording = nil }
-                    }, cancel: { withAnimation(.spring(duration: 0.35)) { recording = nil } })
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
             HStack(alignment: .top, spacing: 16) {
                 Card(padding: 0) {
                     HeadOrbView(pose: motion.pose, ghost: ghost, link: motion.link, enabled: controller.enabled)
@@ -31,6 +22,16 @@ struct GesturesPage: View {
                         }
                 }
                 testCard.frame(width: 300)
+            }
+            // Directly above the tiles so the keyboard appears next to the gesture being bound.
+            if let gesture = recording {
+                Card {
+                    ShortcutRecorderPanel(gesture: gesture, save: { shortcut in
+                        store.configuration.set(GestureBinding(.shortcut, shortcut: shortcut), for: gesture)
+                        withAnimation(.spring(duration: 0.35)) { recording = nil }
+                    }, cancel: { withAnimation(.spring(duration: 0.35)) { recording = nil } })
+                }
+                .transition(.scale(scale: 0.97, anchor: .bottom).combined(with: .opacity))
             }
             // Top-aligned so only the selected tile grows; its neighbours keep their compact height.
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3), spacing: 12) {
@@ -102,38 +103,48 @@ struct GesturesPage: View {
         let isSelected = selected == g
         let firing = controller.lastTrigger?.gesture == g
         let suggestion = controller.suggestion(for: g)
-        return VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                GestureGlyph(gesture: g, size: 14).foregroundStyle(Color.accentColor)
-                Text(g.title).font(.callout.weight(.medium))
-                if isSelected { InfoButton(title: g.title, points: helpPoints(g), help: "说明") }
-                Spacer()
+        let testing = controller.testTarget == g
+        return VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                GestureGlyph(gesture: g, size: 15).foregroundStyle(Color.accentColor).frame(width: 20)
+                Text(g.title).font(.headline)
                 if controller.testPassed.contains(g) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).transition(.scale)
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).transition(.scale).help("测试已通过")
                 }
+                Spacer()
+                if isSelected { InfoButton(title: g.title, points: helpPoints(g), help: "说明") }
+                Button { controller.startTest(g) } label: {
+                    Label(testing ? "测试中" : "测试", systemImage: testing ? "waveform" : "play.fill")
+                        .symbolEffect(.variableColor.iterative, isActive: testing)
+                }
+                .controlSize(.small).buttonStyle(.bordered).buttonBorderShape(.capsule)
+                .disabled(!motion.calibrated || testing)
+                .help(motion.calibrated ? "做一次这个头势，测试时不发送按键" : "先在右上方完成校准")
             }
             ArcGauge(value: motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
                      peak: controller.testPeaks[g], suggestion: suggestion?.angle,
-                     lit: controller.testTarget == g, ready: ready(g))
-                .frame(height: 112)
+                     lit: testing, ready: ready(g))
+                .frame(height: 96)
             statusLine(g, t)
-            actionRow(g)
-            HStack {
-                if suggestion != nil {
-                    Button("采用建议") { controller.applySuggestion(g) }.controlSize(.small).tint(.orange)
-                } else {
-                    Text(t.preset.title).font(.caption).foregroundStyle(.secondary)
+            if suggestion != nil {
+                HStack(spacing: 6) {
+                    Image(systemName: "lightbulb.fill").foregroundStyle(.orange)
+                    Text("根据测试，建议调整幅度").font(.caption)
+                    Spacer()
+                    Button("采用") { controller.applySuggestion(g) }.controlSize(.small)
                 }
-                Spacer()
-                Button(controller.testTarget == g ? "测试中…" : "测试") { controller.startTest(g) }
-                    .controlSize(.small).disabled(!motion.calibrated || controller.testTarget == g)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
-            if isSelected {
-                Divider().padding(.vertical, 4)
-                controls(g)
-                    .transition(.opacity)
+            // Grouped rows like System Settings: the binding is always visible, tuning only on the selected tile.
+            VStack(spacing: 0) {
+                actionRow(g)
+                if isSelected {
+                    controls(g).transition(.opacity)
+                }
             }
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -147,35 +158,46 @@ struct GesturesPage: View {
     }
 
     private func border(_ g: Gesture, selected: Bool) -> Color {
-        recording == g ? Color.red.opacity(0.6) : selected ? Color.accentColor : Color.primary.opacity(0.06)
+        recording == g || selected ? Color.accentColor : Color.primary.opacity(0.06)
     }
 
     // MARK: Key binding (formerly the Shortcuts page)
 
-    /// What this gesture does: a compact action menu plus the bound key, which is also the record button.
+    /// "执行" row: the result reads as a value (keycap / text) with one menu to change it.
     private func actionRow(_ g: Gesture) -> some View {
         let binding = store.configuration.binding(g)
         let firing = controller.lastTrigger?.gesture == g
-        return HStack(spacing: 8) {
-            Image(systemName: "arrow.turn.down.right").font(.caption).foregroundStyle(.tertiary)
-            Picker("动作", selection: actionBinding(g)) { ForEach(ActionKind.allCases) { Text($0.title).tag($0) } }
-                .labelsHidden().fixedSize().controlSize(.small)
+        return settingRow("执行") {
             Spacer(minLength: 4)
             switch binding.action {
             case .shortcut:
-                Button { beginRecording(g) } label: {
-                    if let s = binding.shortcut { KeycapRow(caps: s.caps, size: 12, pressed: firing && controller.lastTrigger?.executed == true) }
-                    else { Label("录制", systemImage: "record.circle").font(.caption).foregroundStyle(.red) }
+                if let s = binding.shortcut {
+                    Button { beginRecording(g) } label: {
+                        KeycapRow(caps: s.caps, size: 11, pressed: firing && controller.lastTrigger?.executed == true)
+                    }
+                    .buttonStyle(.plain).help("点按键帽重新录制").accessibilityLabel("为\(g.title)重新录制快捷键")
+                } else {
+                    Button("录制快捷键…") { beginRecording(g) }.controlSize(.small)
                 }
-                .buttonStyle(.plain).help("点一下重新录制").accessibilityLabel("为\(g.title)录制快捷键")
             case .pause:
-                Image(systemName: "pause.circle").foregroundStyle(.secondary).help("触发时暂停头势控制")
+                Text("暂停头势控制").font(.callout)
             case .disabled:
-                EmptyView()
+                Text("不操作").font(.callout).foregroundStyle(.secondary)
             }
+            Menu {
+                Picker("执行", selection: actionBinding(g)) { ForEach(ActionKind.allCases) { Text($0.title).tag($0) } }
+                    .pickerStyle(.inline).labelsHidden()
+                if binding.action == .shortcut {
+                    Divider()
+                    Button("重新录制快捷键…") { beginRecording(g) }
+                }
+            } label: {
+                Image(systemName: "chevron.up.chevron.down")
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("更改这个头势的动作").accessibilityLabel("更改\(g.title)的动作")
         }
-        .frame(height: 26)
-        .opacity(binding.action == .disabled ? 0.7 : 1)
+        .frame(minHeight: 34)
     }
 
     private func beginRecording(_ g: Gesture) {
@@ -235,41 +257,43 @@ struct GesturesPage: View {
     private func controls(_ g: Gesture) -> some View {
         let t = tuning(g)
         let sound = store.configuration.sound(g)
-        return VStack(alignment: .leading, spacing: 10) {
-            row("灵敏度") {
+        return VStack(spacing: 0) {
+            Divider().padding(.leading, 10)
+            settingRow("灵敏度") {
                 Picker("灵敏度", selection: Binding(get: { t.preset }, set: { value in
                     if value != .custom { store.configuration.tuning[g.rawValue] = .preset(value, for: g) }
                 })) { ForEach(Sensitivity.allCases) { Text($0.title).tag($0) } }
                     .pickerStyle(.segmented).labelsHidden()
             }
-            row("速度") { SpeedSlider(value: speedBinding(g), measured: controller.measuredSpeed(for: g)) }
-            row("提醒音") {
-                HStack(spacing: 6) {
-                    Picker("提醒音", selection: Binding(get: { sound }, set: { value in
-                        store.configuration.sounds[g.rawValue] = value
-                        controller.previewSound(value)
-                    })) {
-                        Text("无").tag("")
-                        Divider()
-                        ForEach(AlertSound.names, id: \.self) { Text($0).tag($0) }
-                    }
-                    .labelsHidden()
-                    Button { controller.previewSound(sound) } label: {
-                        Image(systemName: store.configuration.sound ? "speaker.wave.2.fill" : "speaker.slash")
-                    }
-                    .buttonStyle(.borderless).disabled(sound.isEmpty)
-                    .help(store.configuration.sound ? "试听" : "提示音已在“通用”中关闭")
-                    .accessibilityLabel("试听提醒音")
+            Divider().padding(.leading, 10)
+            settingRow("速度") { SpeedSlider(value: speedBinding(g), measured: controller.measuredSpeed(for: g)) }
+            Divider().padding(.leading, 10)
+            settingRow("提醒音") {
+                Picker("提醒音", selection: Binding(get: { sound }, set: { value in
+                    store.configuration.sounds[g.rawValue] = value
+                    controller.previewSound(value)
+                })) {
+                    Text("无").tag("")
+                    Divider()
+                    ForEach(AlertSound.names, id: \.self) { Text($0).tag($0) }
                 }
+                .labelsHidden()
+                Button { controller.previewSound(sound) } label: {
+                    Image(systemName: store.configuration.sound ? "speaker.wave.2.fill" : "speaker.slash")
+                }
+                .buttonStyle(.borderless).disabled(sound.isEmpty)
+                .help(store.configuration.sound ? "试听" : "提示音已在“通用”中关闭")
+                .accessibilityLabel("试听提醒音")
             }
         }
         .controlSize(.small)
     }
-    private func row<C: View>(_ label: String, @ViewBuilder _ content: () -> C) -> some View {
+    private func settingRow<C: View>(_ label: String, @ViewBuilder _ content: () -> C) -> some View {
         HStack(spacing: 8) {
-            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 40, alignment: .leading)
+            Text(label).font(.callout).frame(width: 46, alignment: .leading)
             content()
         }
+        .padding(.horizontal, 10).padding(.vertical, 7)
     }
     private func helpPoints(_ g: Gesture) -> [(String, String)] {
         [("hand.draw", g.isSequence

@@ -110,22 +110,37 @@ struct ShortcutRecorderPanel: View {
         return order.filter(mods.contains).map { KeyNames.name($0) }
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                Label("为「\(gesture.title)」录制快捷键", systemImage: "record.circle").font(.headline).foregroundStyle(.red)
-                    .symbolEffect(.pulse, isActive: captured == nil)
+        VStack(spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                GestureGlyph(gesture: gesture, size: 18).foregroundStyle(Color.accentColor)
+                    .frame(width: 36, height: 36).background(Color.accentColor.opacity(0.12), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("为「\(gesture.title)」设置快捷键").font(.headline)
+                    Text("在键盘上按下组合键，或点按下方的键。按 Esc 取消。").font(.callout).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Text("按下实体键，或点下面的键；物理 Esc 取消").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 10) {
-                if preview.isEmpty { Text("等待按键…").foregroundStyle(.tertiary).frame(height: 30) }
-                else { KeycapRow(caps: preview, size: 15, pressed: captured == nil) }
-                Spacer()
-                Button("取消", action: cancel).keyboardShortcut(.cancelAction)
                 if captured == nil, latched.count == 1, let only = latched.first {
-                    Button("仅用 \(KeyNames.name(only))") { finish(KeyNames.shortcut(key: only, modifiers: [only])) }.buttonStyle(.borderedProminent)
+                    Button("仅用 \(KeyNames.name(only))") { finish(KeyNames.shortcut(key: only, modifiers: [only])) }
+                }
+                Button("取消", action: cancel).keyboardShortcut(.cancelAction)
+            }
+            // Large, centered "field" like the macOS Keyboard Shortcuts recorder.
+            ZStack {
+                if preview.isEmpty {
+                    Label("正在等待按键…", systemImage: "keyboard").foregroundStyle(.secondary)
+                        .symbolEffect(.pulse, isActive: captured == nil)
+                } else {
+                    KeycapRow(caps: preview, size: 16, pressed: captured == nil)
+                }
+                if captured != nil {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).font(.title3)
+                        .frame(maxWidth: .infinity, alignment: .trailing).padding(.trailing, 14).transition(.scale)
                 }
             }
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor.opacity(captured == nil ? 0.5 : 0), lineWidth: 1.5))
+            .animation(.spring(duration: 0.25), value: captured)
             VirtualKeyboard(lit: held.union(latched).union(captured.map { [$0.keyCode] } ?? [])) { code in
                 if Shortcut.modifierKeyCodes.contains(code) {
                     if latched.contains(code) { latched.remove(code) } else { latched.insert(code) }
