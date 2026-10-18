@@ -13,6 +13,7 @@ struct Trigger: Equatable {
 @MainActor final class AppController: ObservableObject {
     let store: ConfigurationStore
     let motion = MotionService()
+    let microphone = MicrophoneService()
     let keys = KeySender()
     @Published private(set) var enabled = false
     @Published private(set) var testing = false
@@ -119,8 +120,8 @@ struct Trigger: Equatable {
         store.configuration.tuning[gesture.rawValue] = t
     }
 
-    func shutdown() { pause("应用退出"); motion.stop(); timer?.invalidate() }
-    func prepareToQuit() async { pause("正在退出"); keys.release() }
+    func shutdown() { pause("应用退出"); motion.stop(); microphone.stop(); timer?.invalidate() }
+    func prepareToQuit() async { pause("正在退出"); keys.release(); microphone.stop() }
 
     private func receive(_ sample: MotionSample) {
         for gesture in [testTarget, trailing].compactMap({ $0 }) {

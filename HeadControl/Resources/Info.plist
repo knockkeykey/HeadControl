@@ -13,6 +13,7 @@
 <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSMotionUsageDescription</key><string>读取 AirPods 的头部运动，用于你开启的头势控制与校准测试。不采集音频。</string>
+<key>NSMotionUsageDescription</key><string>读取 AirPods 的运动和活动数据，用于实时展示、头势控制与校准测试。</string>
+<key>NSMicrophoneUsageDescription</key><string>仅在你开启麦克风电平时读取所选输入设备的音频，实时显示电平、采样率和声道。不保存或上传音频。</string>
 <key>NSHumanReadableCopyright</key><string>Copyright © 2026 keyknock.</string>
 </dict></plist>

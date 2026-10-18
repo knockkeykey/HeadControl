@@ -38,6 +38,7 @@ for config in ['Debug','Release']:
         # Developer ID gives a stable designated requirement, so TCC grants survive rebuilds (ad-hoc pins a cdhash).
         'CODE_SIGN_STYLE':'Manual','CODE_SIGN_IDENTITY':'Developer ID Application','DEVELOPMENT_TEAM':'MR285FSGSG','ENABLE_HARDENED_RUNTIME':'YES',
         'ENABLE_APP_SANDBOX':'NO','MARKETING_VERSION':'2.1.0','CURRENT_PROJECT_VERSION':'4',
+        'CODE_SIGN_ENTITLEMENTS':'HeadControl/Resources/HeadControl.entitlements',
         'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','SWIFT_OPTIMIZATION_LEVEL':'-Onone' if config=='Debug' else '-O',
         'SWIFT_ACTIVE_COMPILATION_CONDITIONS':'DEBUG' if config=='Debug' else '',
         'COMBINE_HIDPI_IMAGES':'YES','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../Frameworks',

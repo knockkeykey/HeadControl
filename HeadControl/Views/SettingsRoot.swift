@@ -11,7 +11,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .status: "一眼看清：耳机、权限、是否在工作。"
         case .gestures: "小球背对着你，跟你往同一边转。拖动圆弧上的圆点调整需要转多大角度。"
         case .shortcuts: "每个头势按一个键。点“录制”，直接按键盘。"
-        case .permissions: "只有两项，点名称旁的问号看为什么需要。"
+        case .permissions: "头势控制需要两项权限，点名称旁的问号看为什么需要。"
         case .general: "悬浮条、提示音和程序坞图标。"
         }
     }
@@ -170,8 +170,8 @@ struct PermissionCards: View {
     var body: some View {
         VStack(spacing: 14) {
             card(icon: "figure.walk.motion", color: .pink, title: "运动与健身",
-                 subtitle: "读取 AirPods 里的头部角度", ok: controller.motion.authorized,
-                 info: [("eye", "只读取耳机报告的转头、点头、歪头角度"), ("heart.slash", "不读取步数、健康或位置数据"), ("internaldrive", "数据只在这台 Mac 上即时计算，不保存、不上传")],
+                 subtitle: "读取 AirPods 的姿态、运动和活动状态", ok: controller.motion.authorized,
+                 info: [("eye", "读取耳机报告的头部角度、角速度、加速度与活动分类"), ("heart.slash", "不读取健康 App、步数或位置数据"), ("internaldrive", "数据只在这台 Mac 上即时计算，不保存、不上传")],
                  button: controller.motion.authorization == .notDetermined ? "允许" : "打开系统设置",
                  action: { controller.motion.requestPermission() })
             card(icon: "accessibility", color: .blue, title: "辅助功能",
@@ -181,7 +181,8 @@ struct PermissionCards: View {
                      controller.requestAccessibility()
                      if !controller.controlTrusted { controller.openPrivacy("Privacy_Accessibility") }
                  })
-            Text("不需要麦克风、蓝牙、屏幕录制或网络。").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+            Text("头势控制不需要麦克风。头势页的可选电平功能会单独申请麦克风权限，不保存音频。无需蓝牙、屏幕录制或网络权限。")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
     private func card(icon: String, color: Color, title: String, subtitle: String, ok: Bool, info: [(String, String)], button: String, action: @escaping () -> Void) -> some View {

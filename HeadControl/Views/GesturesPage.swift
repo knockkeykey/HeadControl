@@ -24,11 +24,13 @@ struct GesturesPage: View {
                 }
                 testCard.frame(width: 300)
             }
+            MotionDataPanel(motion: motion, microphone: controller.microphone)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
                 ForEach(Gesture.allCases) { tile($0) }
             }
             detail
         }
+        .onDisappear { controller.microphone.stop() }
     }
 
     private var ghost: MotionSample? {
@@ -41,7 +43,7 @@ struct GesturesPage: View {
             ForEach([("转头", motion.pose.yaw), ("点头", motion.pose.pitch), ("歪头", motion.pose.roll)], id: \.0) { name, value in
                 VStack(alignment: .leading, spacing: 0) {
                     Text(name).font(.caption2).foregroundStyle(.secondary)
-                    Text("\(Int(value.rounded()))°").font(.system(.callout, design: .rounded).weight(.medium)).monospacedDigit()
+                    Text(motion.tracking ? "\(Int(value.rounded()))°" : "暂无").font(.system(.callout, design: .rounded).weight(.medium)).monospacedDigit()
                 }
             }
         }
