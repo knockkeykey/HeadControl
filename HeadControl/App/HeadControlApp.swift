@@ -11,7 +11,7 @@ import AppKit
     }
 }
 
-@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let controller = AppController(store: ConfigurationStore())
     private var settingsWindow: NSWindow?
     private var overlay: OverlayController?
@@ -31,6 +31,7 @@ import AppKit
         if settingsWindow == nil {
             let root = SettingsRoot(controller: controller)
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            window.delegate = self
             window.title = "头势控制"; window.contentMinSize = NSSize(width: 900, height: 660)
             window.contentViewController = NSHostingController(rootView: root)
             window.isReleasedWhenClosed = false
@@ -38,6 +39,7 @@ import AppKit
             if CommandLine.arguments.contains("--compact") { window.setContentSize(NSSize(width: 900, height: 660)) }
             window.center(); settingsWindow = window
         }
+        controller.setPreviewVisible(true, surface: "settings")
         settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if let url = Snapshot.target {
             Task { @MainActor in
@@ -45,6 +47,13 @@ import AppKit
                 Snapshot.capture(settingsWindow, to: url); exit(0)
             }
         }
+    }
+    func windowWillClose(_ notification: Notification) { controller.setPreviewVisible(false, surface: "settings") }
+    func windowDidMiniaturize(_ notification: Notification) { controller.setPreviewVisible(false, surface: "settings") }
+    func windowDidDeminiaturize(_ notification: Notification) { controller.setPreviewVisible(true, surface: "settings") }
+    func applicationDidHide(_ notification: Notification) { controller.setPreviewVisible(false, surface: "settings") }
+    func applicationDidUnhide(_ notification: Notification) {
+        controller.setPreviewVisible(settingsWindow?.isVisible == true && settingsWindow?.isMiniaturized == false, surface: "settings")
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

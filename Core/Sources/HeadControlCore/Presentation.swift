@@ -31,7 +31,7 @@ public enum HeadphoneLink: Equatable, Sendable {
         switch self {
         case .idle: "戴上 AirPods Pro 并连接到这台 Mac"
         case .unavailable: "需要 AirPods Pro、AirPods Max 等支持头部追踪的耳机"
-        case .permissionDenied: "到“权限”页允许运动与健身"
+        case .permissionDenied: "到“状态”页的准备清单允许运动与健身"
         case .waiting: "戴上耳机后会自动开始"
         case .tracking: "正在接收头部动作"
         case .interrupted(let reason): reason

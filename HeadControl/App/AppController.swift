@@ -1,13 +1,31 @@
 import AppKit
 import Combine
 
-/// One recognized gesture, kept so every view can animate the same moment.
+enum TriggerOutcome: Equatable {
+    case sent, skipped, preview, unbound, paused
+    var title: String {
+        switch self {
+        case .sent: "已识别，已发键"
+        case .skipped: "已识别，跳过执行"
+        case .preview: "测试识别，未发键"
+        case .unbound: "已识别，未设置动作"
+        case .paused: "已暂停头势控制"
+        }
+    }
+}
 struct Trigger: Equatable {
     let id = UUID()
     let gesture: Gesture
     let caps: [String]
-    let executed: Bool
+    let outcome: TriggerOutcome
     let message: String
+    var executed: Bool { outcome == .sent || outcome == .paused }
+}
+struct FeedbackEvent: Identifiable, Equatable {
+    let id = UUID()
+    var time = Date()
+    let message: String
+    var count = 1
 }
 
 @MainActor final class AppController: ObservableObject {
@@ -18,13 +36,20 @@ struct Trigger: Equatable {
     @Published private(set) var testing = false
     @Published private(set) var notice = "先连接耳机并校准，再开启头势控制"
     @Published private(set) var lastTrigger: Trigger?
-    @Published private(set) var events: [String] = []
+    @Published private(set) var events: [FeedbackEvent] = []
+    @Published private(set) var hudTrigger: Trigger?
+    @Published private(set) var jointTesting = false
+    @Published private(set) var jointLastTrigger: Trigger?
+    @Published private(set) var observingEveryday = false
+    @Published private(set) var jointCounts: [Gesture: Int] = [:]
+    @Published private(set) var everydayCount = 0
+    @Published private(set) var practiceCounts: [Gesture: Int] = [:]
+    @Published private(set) var practiceNotes: [Gesture: String] = [:]
     @Published private(set) var accessibilityTrusted = AXIsProcessTrusted()
     @Published private(set) var postTrusted = CGPreflightPostEventAccess()
     // Calibration test flow: one target at a time, peak travel measured while it is active.
     @Published private(set) var testTarget: Gesture?
     @Published private(set) var testPeaks: [Gesture: Double] = [:]
-    @Published private(set) var testSpeeds: [Gesture: SpeedPeak] = [:]
     @Published private(set) var testPassed: Set<Gesture> = []
     @Published private(set) var testingAll = false
     /// The recognizer's own verdict per gesture, refreshed from every calibrated sample.
@@ -35,15 +60,22 @@ struct Trigger: Equatable {
         didSet { UserDefaults.standard.set(showDockIcon, forKey: "showDockIcon"); applyDockPolicy(keepFront: true) }
     }
     private var router = GestureRouter()
-    /// A passed gesture keeps measuring its peak until the head returns near neutral.
-    private var trailing: Gesture?
+    private var practice: GesturePractice?
+    private var practiceResults: [Gesture: GesturePractice] = [:]
+    private var practiceRecognitions = 0
+    private var attemptRecognized = false
+    private var previousConfiguration: Configuration
+    private var hintDeadline: Date?
+    private var triggerDeadline: Date?
+    private var nearAttempts: Set<Gesture> = []
+    private var previewSurfaces: Set<String> = []
     private var operation = false
     private var suspended = false
     private var timer: Timer?
     private let feedback = SoundFeedback()
     private var cancellables: Set<AnyCancellable> = []
     var overlayChanged: (() -> Void)?
-    var statusTitle: String { testing ? "正在测试头势" : walkingPaused ? "走动中 · 已暂停" : enabled ? "头势控制已开启" : "已暂停" }
+    var statusTitle: String { walkingPaused ? "走动中 · 已暂停" : jointTesting ? "联合测试 · 不发键" : testing ? "正在练习头势" : enabled ? "头势控制已开启" : "已暂停" }
     /// Gestures are suspended, not disabled: control resumes by itself once walking stops.
     var walkingPaused: Bool { motion.walking && store.configuration.pauseWhileWalking && (enabled || testing) }
     /// Both AX and post-event access are presented as one "辅助功能" permission.
@@ -53,20 +85,51 @@ struct Trigger: Equatable {
 
     init(store: ConfigurationStore) {
         self.store = store
+        previousConfiguration = store.configuration
         store.onChange = { [weak self] in
             guard let self else { return }
             // New settings apply to the next gesture; control stays on.
             self.router.configurationChanged(); self.keys.release()
             self.gestureStatus = [:]; self.blockedHint = nil
-            self.testPassed.formIntersection(self.store.configuration.enabledGestures)
-            if let target = self.testTarget, !self.store.configuration.isEnabled(target) { self.setTesting(false) }
-            if let trailing = self.trailing, !self.store.configuration.isEnabled(trailing) { self.trailing = nil }
+            let next = self.store.configuration
+            let changed = Gesture.allCases.filter {
+                next.isEnabled($0) != self.previousConfiguration.isEnabled($0) || next.tuning[$0.rawValue] != self.previousConfiguration.tuning[$0.rawValue]
+            }
+            for gesture in changed {
+                self.testPassed.remove(gesture); self.practiceResults[gesture] = nil
+                self.practiceCounts[gesture] = nil; self.practiceNotes[gesture] = nil
+                self.testPeaks[gesture] = nil
+            }
+            if let target = self.testTarget {
+                if !next.isEnabled(target) { self.setTesting(false) }
+                else if changed.contains(target) {
+                    self.practice = GesturePractice(gesture: target); self.practiceRecognitions = 0; self.attemptRecognized = false
+                    self.notice = "参数已修改，请重新完成三次动作"
+                }
+            }
+            if !changed.isEmpty {
+                self.nearAttempts.removeAll()
+                self.jointCounts.removeAll(); self.everydayCount = 0; self.jointLastTrigger = nil
+                if self.jointTesting { self.notice = "识别设置已修改，联合测试记录已重置" }
+            }
+            if self.jointTesting && next.enabledGestures.isEmpty { self.setTesting(false) }
+            self.previousConfiguration = next
+            self.syncMotionUsage()
             self.prepareSounds()
             self.overlayChanged?()
         }
         prepareSounds()
         motion.onSample = { [weak self] sample in self?.receive(sample) }
-        motion.onInvalidation = { [weak self] reason in self?.pause(reason) }
+        motion.onInvalidation = { [weak self] reason in
+            guard let self else { return }
+            self.testPassed.removeAll(); self.practiceResults.removeAll(); self.practiceCounts.removeAll()
+            self.practiceNotes.removeAll(); self.testPeaks.removeAll()
+            self.jointCounts.removeAll(); self.everydayCount = 0; self.jointLastTrigger = nil
+            self.pause(reason)
+        }
+        motion.onCalibrationResult = { [weak self] message in
+            self?.notice = message + "，头势控制保持暂停"
+        }
         // Forward nested changes so views observing only the controller stay current.
         motion.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
         timer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
@@ -75,10 +138,11 @@ struct Trigger: Equatable {
                 let ax = AXIsProcessTrusted(), post = self.keys.canPost
                 if ax != self.accessibilityTrusted { self.accessibilityTrusted = ax }
                 if post != self.postTrusted { self.postTrusted = post }
-                if self.enabled && !post { self.pause("辅助功能权限不可用，头势控制已暂停") }
+                self.refreshFeedback()
+                if self.enabled && (!ax || !post) { self.pause("辅助功能权限不可用，头势控制已暂停") }
             }
         }
-        // Listen automatically once permission exists; the first request comes from the 权限 page.
+        // Listen automatically once permission exists; the first request comes from the 状态 page.
         if motion.authorized { motion.start() }
     }
     func requestAccessibility() {
@@ -94,48 +158,76 @@ struct Trigger: Equatable {
     func openPrivacy(_ pane: String) {
         if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
     }
+    func setPreviewVisible(_ visible: Bool, surface: String) {
+        if visible { previewSurfaces.insert(surface) } else { previewSurfaces.remove(surface) }
+        syncMotionUsage()
+    }
+    private func syncMotionUsage() {
+        motion.setUsage(active: enabled || testing, preview: !previewSurfaces.isEmpty, pauseWhileWalking: store.configuration.pauseWhileWalking)
+    }
     func setEnabled(_ value: Bool) {
         guard value else { pause("头势控制已暂停"); return }
         guard motion.tracking, motion.calibrated else { notice = "请先连接耳机并校准正前方"; return }
         guard keys.canPost else { notice = "请先在“状态”页的准备清单里授予辅助功能"; return }
-        stopTest(); testing = false; enabled = true; router.setMode(.active)
+        stopTest(); testing = false; enabled = true; suspended = false; router.setMode(.active)
+        clearTransientFeedback(); syncMotionUsage()
         notice = "已开启：做头势会点按对应快捷键"
         overlayChanged?()
     }
     func setTesting(_ value: Bool) {
-        enabled = false; testing = value; keys.release(); router.setMode(value ? .testing : .paused)
+        enabled = false; testing = value; suspended = false; keys.release(); router.setMode(value ? .testing : .paused)
+        clearTransientFeedback()
         if !value { stopTest() }
-        notice = value ? "测试中，不会发送快捷键" : "测试已结束，头势控制保持暂停"
+        syncMotionUsage()
+        notice = value ? "练习中，请舒适地完成三次动作，不会发送快捷键" : "测试已结束，头势控制保持暂停"
         overlayChanged?()
     }
     func calibrate() { motion.recenter() }
 
     // MARK: Calibration test
     func startTest(_ gesture: Gesture, all: Bool = false) {
-        guard store.configuration.isEnabled(gesture) else { return }
+        guard store.configuration.isEnabled(gesture), motion.calibrated else { return }
         if !testing { setTesting(true) }
-        testingAll = all; testTarget = gesture; testPeaks[gesture] = 0; testSpeeds[gesture] = SpeedPeak()
-        router.setMode(.testing)
+        jointTesting = false; observingEveryday = false
+        jointCounts.removeAll(); everydayCount = 0; jointLastTrigger = nil
+        testingAll = all; testTarget = gesture
+        practice = GesturePractice(gesture: gesture); practiceRecognitions = 0; attemptRecognized = false
+        practiceCounts[gesture] = 0; practiceNotes[gesture] = nil; practiceResults[gesture] = nil
+        testPassed.remove(gesture); testPeaks[gesture] = 0
+        clearTransientFeedback(); router.setMode(.testing)
     }
     func startAllTests() {
         guard let first = store.configuration.enabledGestures.first else { return }
-        testPassed.removeAll(); testPeaks.removeAll(); testSpeeds.removeAll()
+        testPassed.removeAll(); testPeaks.removeAll()
         startTest(first, all: true)
     }
-    func stopTest() { testTarget = nil; testingAll = false; trailing = nil }
+    func startJointTest() {
+        guard !store.configuration.enabledGestures.isEmpty, motion.calibrated else { return }
+        setTesting(true); stopTest(); jointTesting = true
+        jointCounts.removeAll(); everydayCount = 0; jointLastTrigger = nil; testPassed.removeAll()
+        notice = "所有已开启头势同时识别。先做指令动作，再观察日常动作；全程不发键。"
+        router.setMode(.testing); overlayChanged?()
+    }
+    func setEverydayObservation(_ value: Bool) {
+        guard jointTesting else { return }
+        observingEveryday = value; everydayCount = 0; jointCounts.removeAll(); jointLastTrigger = nil
+        router.setMode(.testing); clearTransientFeedback()
+        notice = value ? "自然看屏幕、说话和低头；这里出现的识别可作为误触线索，不会发键。" : "做需要使用的头势，检查是否被识别成其他动作；不会发键。"
+    }
+    func stopTest() {
+        testTarget = nil; testingAll = false; jointTesting = false; observingEveryday = false; practice = nil
+    }
     struct Suggestion: Equatable { var angle: Double; var speed: Double? }
     /// Measured speed of the last test movement, on the same scale as the speed slider.
     func measuredSpeed(for gesture: Gesture) -> Double? {
-        guard let peak = testSpeeds[gesture], peak.measured else { return nil }
-        let value = peak.effective(sequence: gesture.isSequence)
-        return value > 0 ? value : nil
+        practiceResults[gesture]?.medianSpeed ?? (testTarget == gesture ? practice?.medianSpeed : nil)
     }
     /// One suggestion for both angle and speed, offered only when it changes something.
     func suggestion(for gesture: Gesture) -> Suggestion? {
-        guard let peak = testPeaks[gesture], peak >= 8 else { return nil }
+        guard let result = practiceResults[gesture], result.complete, result.consistent, let peak = result.medianPeak else { return nil }
         let tuning = store.configuration.tuning[gesture.rawValue] ?? .defaults(for: gesture)
         guard let angle = ThresholdAdvisor.suggest(peak: peak, tuning: tuning) else { return nil }
-        let speed = measuredSpeed(for: gesture).flatMap { ThresholdAdvisor.suggestSpeed(peak: $0) }
+        let speed = result.medianSpeed.flatMap { ThresholdAdvisor.suggestSpeed(peak: $0) }
         let changesAngle = abs(angle - tuning.angle) >= 1
         let changesSpeed = speed.map { abs($0 - tuning.speed) >= 5 } ?? false
         return changesAngle || changesSpeed ? Suggestion(angle: angle, speed: speed) : nil
@@ -152,32 +244,31 @@ struct Trigger: Equatable {
     func prepareToQuit() async { pause("正在退出"); keys.release() }
 
     private func receive(_ sample: MotionSample) {
-        for gesture in [testTarget, trailing].compactMap({ $0 }) {
-            let travel = gesture.travel(sample)
-            if travel > (testPeaks[gesture] ?? 0) + 0.5 { testPeaks[gesture] = travel.rounded() }
-            if let rate = sample.rate {
-                var speed = testSpeeds[gesture] ?? SpeedPeak(); speed.record(gesture.rate(rate))
-                if speed != testSpeeds[gesture] { testSpeeds[gesture] = speed }
-            }
-        }
         if walkingPaused {
-            // Drop any half-finished gesture so stopping mid-step cannot complete it.
-            if !suspended { suspended = true; router.setMode(.paused); gestureStatus = [:]; overlayChanged?() }
+            if !suspended {
+                suspended = true; router.setMode(.paused); gestureStatus = [:]
+                practice?.interrupt(); attemptRecognized = false; clearTransientFeedback(); overlayChanged?()
+            }
             return
         }
-        if suspended { suspended = false; router.setMode(testing ? .testing : .active); overlayChanged?() }
-        if trailing != nil, max(abs(sample.yaw),abs(sample.pitch),abs(sample.roll)) < 7 { trailing = nil }
+        if suspended {
+            suspended = false; router.setMode(testing ? .testing : enabled ? .active : .paused); overlayChanged?()
+        }
         let route = router.update(sample,configuration:store.configuration,testingGesture:testTarget)
-        publishStatus()
+        publishStatus(sample)
+        if testing {
+            if let route { playSound(for: route.gesture); showPreview(route) }
+            updatePractice(sample)
+            return
+        }
         guard let route else { return }
         // This acknowledges recognition, independent of key delivery. Start before a
         // shortcut can open voice input and reconfigure the Bluetooth audio device.
         playSound(for: route.gesture)
-        if testing { showPreview(route); return }
         guard route.executes else {
             if enabled {
                 notice = "\(route.gesture.title) 已识别，但未设置动作"
-                lastTrigger = Trigger(gesture:route.gesture,caps:[],executed:false,message:notice)
+                publishTrigger(Trigger(gesture:route.gesture,caps:[],outcome:.unbound,message:notice))
                 record(notice); overlayChanged?()
             }
             return
@@ -187,64 +278,120 @@ struct Trigger: Equatable {
         Task { await self.perform(route,targetPID:targetPID) }
     }
     private func perform(_ route: GestureRouter.Route, targetPID: pid_t?) async {
-        guard router.accepts(route), enabled, !operation else { return }
+        guard router.accepts(route), enabled else { return }
+        guard !operation else { skip(route, reason: "上一次按键尚未结束"); return }
         if route.binding.action == .pause {
-            lastTrigger = Trigger(gesture:route.gesture,caps:[],executed:true,message:"暂停头势控制")
+            publishTrigger(Trigger(gesture:route.gesture,caps:[],outcome:.paused,message:"暂停头势控制"))
+            record("已通过\(route.gesture.title)暂停")
             pause("已通过\(route.gesture.title)暂停"); return
         }
-        guard route.binding.action == .shortcut, let shortcut = route.binding.shortcut, let targetPID else { return }
+        guard route.binding.action == .shortcut, let shortcut = route.binding.shortcut else { return }
+        guard let targetPID else { skip(route, reason: "没有可接收按键的前台应用"); return }
         operation = true; defer { operation = false }
         do {
             try await keys.click(shortcut,targetPID:targetPID)
             guard router.accepts(route), enabled else { return }
             notice = "\(route.gesture.title) → 已点按 \(shortcut.label)"
-            lastTrigger = Trigger(gesture:route.gesture,caps:shortcut.caps,executed:true,message:notice)
+            publishTrigger(Trigger(gesture:route.gesture,caps:shortcut.caps,outcome:.sent,message:notice))
             record(notice)
         } catch {
             guard router.accepts(route), enabled else { return }
-            notice = error.localizedDescription; record(notice)
-            lastTrigger = Trigger(gesture:route.gesture,caps:shortcut.caps,executed:false,message:notice)
+            notice = "\(route.gesture.title)已识别，跳过执行：\(error.localizedDescription)"; record(notice)
+            publishTrigger(Trigger(gesture:route.gesture,caps:shortcut.caps,outcome:.skipped,message:error.localizedDescription))
         }
         overlayChanged?()
     }
-    /// Published only on visible change: progress is quantized so 100 Hz samples don't redraw every frame.
-    private func publishStatus() {
+    private func skip(_ route: GestureRouter.Route, reason: String) {
+        notice = reason; record("\(route.gesture.title)：\(reason)")
+        publishTrigger(Trigger(gesture: route.gesture, caps: route.binding.shortcut?.caps ?? [], outcome: .skipped, message: reason))
+        overlayChanged?()
+    }
+    private func publishStatus(_ sample: MotionSample) {
         let next = router.status.mapValues { st in
             GestureStatus(phase: st.phase, progress: (st.progress * 10).rounded() / 10, speed: st.speed.map { ($0 / 5).rounded() * 5 })
         }
-        for (g, st) in next where gestureStatus[g]?.phase != st.phase {
-            switch st.phase {
-            case .tooSlow:
-                let need = Int((store.configuration.tuning[g.rawValue] ?? .defaults(for: g)).speed)
-                blockedHint = "\(g.shortTitle)太慢 \(Int(st.speed ?? 0))/\(need)°/s"
-            case .fired: blockedHint = nil
-            default: break
+        if enabled || testing {
+            for g in Gesture.allCases {
+                guard let st = next[g] else { continue }
+                let old = gestureStatus[g]?.phase
+                let tuning = store.configuration.tuning[g.rawValue] ?? .defaults(for: g)
+                if st.phase == .below, g.travel(sample) >= max(5, tuning.angle * 0.45) { nearAttempts.insert(g) }
+                if st.phase == .fired { nearAttempts.removeAll(); blockedHint = nil; hintDeadline = nil }
+                else if old != st.phase {
+                    switch st.phase {
+                    case .tooSlow: showHint("\(g.shortTitle)：速度不足（\(Int(st.speed ?? 0))/\(Int(tuning.speed))°/s）")
+                    case .mixed: showHint("\(g.shortTitle)：其他方向动作太大")
+                    case .release where old == .holding: showHint("\(g.shortTitle)：超时，未完成回位")
+                    case .below where old == .holding && !g.isSequence: showHint("\(g.shortTitle)：保持时间不足")
+                    default: break
+                    }
+                }
+                if st.phase == .below, g.travel(sample) <= min(tuning.neutral, 6), nearAttempts.remove(g) != nil {
+                    showHint("\(g.shortTitle)：动作幅度不足")
+                }
             }
         }
         if next != gestureStatus { gestureStatus = next }
+    }
+    private func showHint(_ text: String) {
+        blockedHint = text; hintDeadline = Date().addingTimeInterval(4)
+        record("未完成头势：\(text)")
+    }
+    private func publishTrigger(_ trigger: Trigger) {
+        lastTrigger = trigger; hudTrigger = trigger; triggerDeadline = Date().addingTimeInterval(4)
+        blockedHint = nil; hintDeadline = nil
+    }
+    func refreshFeedback(now: Date = Date()) {
+        if let hintDeadline, now >= hintDeadline { blockedHint = nil; self.hintDeadline = nil }
+        if let triggerDeadline, now >= triggerDeadline { hudTrigger = nil; self.triggerDeadline = nil }
+    }
+    private func clearTransientFeedback() {
+        blockedHint = nil; hintDeadline = nil; hudTrigger = nil; triggerDeadline = nil; nearAttempts.removeAll()
     }
     private func showPreview(_ route: GestureRouter.Route) {
         let binding = route.binding
         let caps = binding.action == .shortcut ? (binding.shortcut?.caps ?? []) : []
         let action = binding.action == .shortcut ? (binding.shortcut?.label ?? "尚未录入") : binding.action.title
         let message = "\(route.gesture.title) → \(action)（测试，未发送）"
-        lastTrigger = Trigger(gesture:route.gesture,caps:caps,executed:false,message:message)
+        publishTrigger(Trigger(gesture:route.gesture,caps:caps,outcome:.preview,message:message))
         record(message)
-        if let target = testTarget, target == route.gesture {
-            testPassed.insert(target); trailing = target
-            let gestures = store.configuration.enabledGestures
-            if testingAll, let i = gestures.firstIndex(of: target), i + 1 < gestures.count {
-                let next = gestures[i + 1]
-                testTarget = next; testPeaks[next] = 0; testSpeeds[next] = SpeedPeak()
-                // A new test target starts fresh, without the previous test's cooldown.
-                router.configurationChanged()
-            } else { testTarget = nil; testingAll = false }
+        if jointTesting {
+            jointLastTrigger = lastTrigger
+            jointCounts[route.gesture, default: 0] += 1
+            if observingEveryday { everydayCount += 1 }
+            else { testPassed.insert(route.gesture) }
+        } else if testTarget == route.gesture { attemptRecognized = true }
+        overlayChanged?()
+    }
+    private func updatePractice(_ sample: MotionSample) {
+        guard let target = testTarget, var current = practice else { return }
+        let t = store.configuration.tuning[target.rawValue] ?? .defaults(for: target)
+        let attempt = current.update(sample, neutral: t.neutral)
+        practice = current
+        if current.peak > (testPeaks[target] ?? 0) { testPeaks[target] = current.peak.rounded() }
+        guard attempt != nil else {
+            if !current.inProgress { attemptRecognized = false }
+            return
         }
+        if attemptRecognized { practiceRecognitions += 1 }
+        attemptRecognized = false
+        practiceCounts[target] = current.attempts.count
+        guard current.complete else { notice = "\(target.title)：已完成 \(current.attempts.count)/3 次，回正后再做一次"; return }
+        practiceResults[target] = current
+        testPeaks[target] = current.medianPeak?.rounded()
+        if practiceRecognitions >= 3 { testPassed.insert(target) }
+        let note = current.consistent ? "已完成三次，幅度相近；可参考建议，采用后重新测试。" : "三次幅度差异较大，请用舒适且相近的幅度重新练习。"
+        practiceNotes[target] = note
+        notice = "\(target.title)练习完成。\(note)"
+        let gestures = store.configuration.enabledGestures
+        if testingAll, let i = gestures.firstIndex(of: target), i + 1 < gestures.count {
+            startTest(gestures[i + 1], all: true)
+        } else { testTarget = nil; testingAll = false; practice = nil; setTesting(false); notice = "三次动作练习已完成，可采用建议或开始联合测试。" }
         overlayChanged?()
     }
     private func pause(_ reason: String) {
         enabled = false; testing = false; suspended = false; stopTest(); router.setMode(.paused); keys.release()
-        gestureStatus = [:]; blockedHint = nil
+        gestureStatus = [:]; clearTransientFeedback(); syncMotionUsage()
         notice = reason; overlayChanged?()
     }
     private func playSound(for gesture: Gesture) {
@@ -261,7 +408,9 @@ struct Trigger: Equatable {
         catch { record("提醒音播放失败：\(error.localizedDescription)") }
     }
     private func record(_ message: String) {
-        if events.first == message { return }
-        events.insert(message,at:0); if events.count > 24 { events.removeLast(events.count-24) }
+        if events.first?.message == message {
+            events[0].count += 1; events[0].time = Date(); return
+        }
+        events.insert(FeedbackEvent(message: message),at:0); if events.count > 24 { events.removeLast(events.count-24) }
     }
 }

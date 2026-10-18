@@ -580,3 +580,100 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(esc.label, "Esc"); XCTAssertTrue(esc.isValid)
     }
 }
+
+final class PracticeTests: XCTestCase {
+    func testStableCalibrationRequiresAContinuousQuietSecond() {
+        var window = StablePoseWindow()
+        XCTAssertFalse(window.update(.init(time: 0)))
+        XCTAssertFalse(window.update(.init(time: 0.3)))
+        XCTAssertFalse(window.update(.init(time: 0.6, yaw: 10)))
+        XCTAssertEqual(window.progress, 0)
+        for t in [0.9, 1.2, 1.5] { XCTAssertFalse(window.update(.init(time: t, yaw: 10))) }
+        XCTAssertTrue(window.update(.init(time: 1.7, yaw: 10)))
+    }
+    func testCalibrationRejectsGapsInvalidSamplesAndFastRotation() {
+        var window = StablePoseWindow()
+        _ = window.update(.init(time: 0))
+        XCTAssertFalse(window.update(.init(time: 1.2)))
+        XCTAssertEqual(window.progress, 0)
+        XCTAssertFalse(window.update(.init(time: 1.4, rate: .init(yaw: 20))))
+        XCTAssertEqual(window.progress, 0)
+        XCTAssertFalse(window.update(.init(time: .nan)))
+        XCTAssertEqual(window.progress, 0)
+    }
+    func testCalibrationHandlesYawWrap() {
+        var window = StablePoseWindow()
+        for (i, yaw) in [179.5, -179.5, 179.5, -179.5].enumerated() {
+            XCTAssertFalse(window.update(.init(time: Double(i) * 0.3, yaw: yaw)))
+        }
+        XCTAssertTrue(window.update(.init(time: 1.2, yaw: 179.5)))
+    }
+    func testLearningCollectsThreeFullExcursionsBelowExistingThreshold() {
+        var practice = GesturePractice(gesture: .tiltLeft)
+        var time = 0.0
+        func sample(_ roll: Double, _ rate: Double = 0) -> MotionSample {
+            time += 0.1; return .init(time: time, roll: roll, rate: .init(roll: rate))
+        }
+        for peak in [12.0, 14, 16] {
+            _ = practice.update(sample(0), neutral: 7)
+            _ = practice.update(sample(-peak, -80), neutral: 7)
+            _ = practice.update(sample(-peak), neutral: 7)
+            _ = practice.update(sample(-peak), neutral: 7)
+            XCTAssertNotNil(practice.update(sample(0, 70), neutral: 7))
+        }
+        XCTAssertTrue(practice.complete)
+        XCTAssertTrue(practice.consistent)
+        XCTAssertEqual(practice.medianPeak, 14)
+        XCTAssertEqual(practice.medianSpeed, 80)
+    }
+    func testPracticeRejectsHeldStartingPoseGapAndMixedAxes() {
+        var practice = GesturePractice(gesture: .tiltLeft)
+        for i in 0...15 { _ = practice.update(.init(time: Double(i) * 0.1, roll: -25), neutral: 7) }
+        XCTAssertTrue(practice.attempts.isEmpty)
+        _ = practice.update(.init(time: 2), neutral: 7)
+        _ = practice.update(.init(time: 2.1, roll: -25), neutral: 7)
+        _ = practice.update(.init(time: 3), neutral: 7)
+        XCTAssertTrue(practice.attempts.isEmpty)
+        _ = practice.update(.init(time: 3.1, yaw: 30, roll: -25), neutral: 7)
+        _ = practice.update(.init(time: 3.4), neutral: 7)
+        XCTAssertTrue(practice.attempts.isEmpty)
+    }
+    func testShakePracticeNeedsBothDirectionsAndReturn() {
+        var practice = GesturePractice(gesture: .shake)
+        _ = practice.update(.init(time: 0), neutral: 7)
+        _ = practice.update(.init(time: 0.1, yaw: 25), neutral: 7)
+        XCTAssertNil(practice.update(.init(time: 0.4), neutral: 7))
+        _ = practice.update(.init(time: 0.5, yaw: -25), neutral: 7)
+        _ = practice.update(.init(time: 0.7, yaw: 25), neutral: 7)
+        XCTAssertNotNil(practice.update(.init(time: 0.9), neutral: 7))
+        XCTAssertEqual(practice.attempts.count, 1)
+    }
+    func testInconsistentPracticeDoesNotOfferAConfidentSuggestion() {
+        var practice = GesturePractice(gesture: .nod)
+        var time = 0.0
+        for peak in [12.0, 40, 14] {
+            for pitch in [0.0, -peak, -peak, -peak, 0] {
+                time += 0.1; _ = practice.update(.init(time: time, pitch: pitch), neutral: 7)
+            }
+        }
+        XCTAssertTrue(practice.complete)
+        XCTAssertFalse(practice.consistent)
+        XCTAssertEqual(practice.medianPeak, 14)
+    }
+    func testResourcePolicyCoversPausePreviewWalkingAndSystemSuspension() {
+        var usage = MotionUsage(tracking: true)
+        XCTAssertFalse(usage.needsRealtime); XCTAssertFalse(usage.needsPose)
+        usage.preview = true
+        XCTAssertTrue(usage.needsPose); XCTAssertFalse(usage.needsRealtime)
+        usage.active = true
+        XCTAssertTrue(usage.needsRealtime)
+        usage.walking = true
+        XCTAssertFalse(usage.needsRealtime)
+        usage.calibrating = true
+        XCTAssertTrue(usage.needsRealtime)
+        usage.suspended = true
+        XCTAssertFalse(usage.needsRealtime); XCTAssertFalse(usage.needsPose)
+        usage.suspended = false; usage.tracking = false
+        XCTAssertFalse(usage.needsRealtime)
+    }
+}

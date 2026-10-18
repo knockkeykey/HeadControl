@@ -23,6 +23,7 @@ struct MenuBarPanel: View {
                 .frame(height: 150).frame(maxWidth: .infinity)
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             LastTriggerView(trigger: controller.lastTrigger).frame(maxWidth: .infinity, alignment: .leading)
+            if motion.calibrating { ProgressView(value: motion.calibrationProgress) }
             Text(controller.notice).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             if !controller.permissionsReady {
                 Button { openSettings() } label: { Label("还有权限未授予", systemImage: "exclamationmark.circle.fill") }
@@ -30,7 +31,7 @@ struct MenuBarPanel: View {
             }
             Divider()
             HStack {
-                Button { controller.calibrate() } label: { Label("校准", systemImage: "scope") }.disabled(!motion.tracking)
+                Button { if motion.calibrating { motion.cancelCalibration() } else { controller.calibrate() } } label: { Label(motion.calibrating ? "取消校准" : "校准", systemImage: "scope") }.disabled(!motion.tracking)
                 if controller.testing { Button("结束测试") { controller.setTesting(false) } }
                 Spacer()
                 Button("设置…", action: openSettings).keyboardShortcut(",")
@@ -38,5 +39,7 @@ struct MenuBarPanel: View {
             }.buttonStyle(.borderless)
         }
         .padding(16).frame(width: 320)
+        .onAppear { controller.setPreviewVisible(true, surface: "menu") }
+        .onDisappear { controller.setPreviewVisible(false, surface: "menu") }
     }
 }

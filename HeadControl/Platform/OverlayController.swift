@@ -8,7 +8,7 @@ private final class PassivePanel: NSPanel {
 @MainActor final class OverlayController {
     private let panel: PassivePanel
     private let controller: AppController
-    private let size = NSSize(width: 300, height: 64)
+    private let size = NSSize(width: 360, height: 84)
     init(controller: AppController) {
         self.controller = controller
         panel = PassivePanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -35,14 +35,15 @@ private struct StatusHUD: View {
     var body: some View {
         HStack(spacing: 12) {
             HeadphoneBadge(link: controller.motion.link, enabled: controller.enabled, size: 36)
-            if let hint = controller.blockedHint {
-                Image(systemName: "tortoise.fill").font(.system(size: 13)).foregroundStyle(.orange)
-                Text(hint).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-            } else if let t = controller.lastTrigger {
-                GestureGlyph(gesture: t.gesture, size: 16).foregroundStyle(t.executed ? Color.green : Color.accentColor)
-                Image(systemName: "arrow.right").font(.caption).foregroundStyle(.tertiary)
-                if t.caps.isEmpty { Text(t.gesture.shortTitle).font(.system(size: 12)) }
-                else { KeycapRow(caps: t.caps, size: 12, pressed: bounce) }
+            if controller.walkingPaused {
+                Label("走动中 · 暂停识别", systemImage: "figure.walk").font(.callout).foregroundStyle(.orange)
+            } else if let hint = controller.blockedHint {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("未完成头势").font(.caption.weight(.medium)).foregroundStyle(.orange)
+                    Text(hint).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+            } else if let trigger = controller.hudTrigger {
+                LastTriggerView(trigger: trigger)
             } else {
                 Text(controller.testing ? "测试中，不发送按键" : "做个头势试试").font(.system(size: 12)).foregroundStyle(.secondary)
             }
@@ -51,7 +52,7 @@ private struct StatusHUD: View {
                 if controller.testing { controller.setTesting(false) } else { controller.setEnabled(false) }
             } label: { Image(systemName: "pause.fill") }.buttonStyle(.borderless).help("暂停头势控制")
         }
-        .padding(.horizontal, 14).frame(width: 300, height: 64)
+        .padding(.horizontal, 14).frame(width: 360, height: 84)
         .background(.regularMaterial, in: Capsule())
         .scaleEffect(bounce && !reduceMotion ? 1.06 : 1)
         .onChange(of: controller.lastTrigger?.id) { _, _ in

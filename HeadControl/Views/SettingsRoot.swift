@@ -83,8 +83,9 @@ struct StatusPage: View {
                     HeadphoneBadge(link: motion.link, enabled: controller.enabled, size: 96)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(motion.link.title).font(.title2.weight(.semibold))
-                        Text(motion.tracking && !motion.calibrated ? "正对屏幕坐好，点“校准正前方”" : motion.link.detail)
+                        Text(motion.tracking && !motion.calibrated ? motion.calibrationHint : motion.link.detail)
                             .foregroundStyle(.secondary)
+                        if motion.calibrating { ProgressView(value: motion.calibrationProgress).frame(width: 180) }
                         if motion.calibrated { Label("已校准 · 数据来自\(motion.sensor)", systemImage: "scope").font(.caption).foregroundStyle(.green) }
                     }
                     Spacer()
@@ -123,7 +124,11 @@ struct StatusPage: View {
                         Divider()
                         if controller.events.isEmpty { Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary) }
                         ForEach(Array(controller.events.prefix(6).enumerated()), id: \.offset) { _, e in
-                            Text(e).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(e.time, format: .dateTime.hour().minute().second()).monospacedDigit().foregroundStyle(.tertiary)
+                                Text(e.message + (e.count > 1 ? " ×\(e.count)" : "")).textSelection(.enabled)
+                            }.font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
@@ -192,8 +197,8 @@ struct ReadinessChecklist: View {
                     action: ("重新连接", { motion.reconnect() }))
                 Divider().padding(.leading, 46)
                 row(icon: "scope", color: .teal, title: "校准正前方",
-                    detail: motion.calibrated ? "可随时重新校准" : "正对屏幕坐好，头放正", ok: motion.calibrated,
-                    action: motion.tracking ? ("校准", { controller.calibrate() }) : nil, keepActionWhenDone: true)
+                    detail: motion.calibrated ? "可随时重新校准" : motion.calibrationHint, ok: motion.calibrated,
+                    action: motion.tracking ? (motion.calibrating ? "取消" : "校准", { if motion.calibrating { motion.cancelCalibration() } else { controller.calibrate() } }) : nil, keepActionWhenDone: true)
                 Divider().padding(.leading, 46)
                 row(icon: "keyboard", color: .indigo, title: "设置头势按键",
                     detail: "已开启并绑定 \(bound) 个头势", ok: bound > 0,
@@ -235,21 +240,29 @@ struct ReadinessChecklist: View {
 struct LastTriggerView: View {
     let trigger: Trigger?
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .top, spacing: 10) {
             if let trigger {
-                GestureGlyph(gesture: trigger.gesture, size: 24).foregroundStyle(trigger.executed ? Color.green : Color.accentColor).frame(width: 34)
-                Text(trigger.gesture.title).font(.body.weight(.medium))
-                Image(systemName: "arrow.right").foregroundStyle(.tertiary)
-                if trigger.caps.isEmpty { Text(trigger.message).font(.caption).foregroundStyle(.secondary) }
-                else { KeycapRow(caps: trigger.caps, size: 13) }
+                GestureGlyph(gesture: trigger.gesture, size: 20)
+                    .foregroundStyle(trigger.outcome == .skipped ? Color.orange : trigger.executed ? .green : .accentColor)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(trigger.gesture.title).font(.callout.weight(.medium))
+                        if !trigger.caps.isEmpty { KeycapRow(caps: trigger.caps, size: 11) }
+                    }
+                    Text(trigger.outcome.title).font(.caption.weight(.medium))
+                        .foregroundStyle(trigger.outcome == .skipped ? .orange : .secondary)
+                    if trigger.outcome == .skipped {
+                        Text(trigger.message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             } else {
                 Image(systemName: "hand.wave").font(.title2).foregroundStyle(.tertiary)
                 Text("做个头势试试").foregroundStyle(.secondary)
             }
         }
         .id(trigger?.id)
-        .transition(.scale(scale: 0.85).combined(with: .opacity))
-        .animation(.spring(duration: 0.3), value: trigger?.id)
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.2), value: trigger?.id)
     }
 }
 
@@ -280,7 +293,7 @@ struct GeneralPage: View {
                     }
                 }
             }
-            Text("启动时总是暂停。修改设置、耳机断开或重新校准，也会自动暂停。").font(.caption).foregroundStyle(.secondary)
+            Text("启动、耳机断开、重新校准、屏幕休眠或会话离开后保持暂停。修改设置会清空未完成动作，控制保持当前状态；修改识别参数后需重新测试。").font(.caption).foregroundStyle(.secondary)
         }
     }
     private func toggleRow(_ title: String, _ detail: String, _ icon: String, _ isOn: Binding<Bool>) -> some View {

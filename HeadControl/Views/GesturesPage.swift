@@ -25,6 +25,7 @@ struct GesturesPage: View {
                 }
                 testCard.frame(width: 300)
             }
+            jointTestCard
             // Directly above the tiles so the keyboard appears next to the gesture being bound.
             if let gesture = recording {
                 Card {
@@ -36,8 +37,15 @@ struct GesturesPage: View {
                 .transition(.scale(scale: 0.97, anchor: .bottom).combined(with: .opacity))
             }
             // Top-aligned so only the selected tile grows; its neighbours keep their compact height.
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3), spacing: 12) {
-                ForEach(Gesture.allCases) { tile($0) }
+            // Six native-control cards do not need lazy sizing. Eager rows keep tall
+            // parameter panels stable when entering this page or scrolling them offscreen.
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(Array(Gesture.allCases.prefix(3))) { tile($0).frame(minWidth: 0, maxWidth: .infinity, alignment: .top) }
+                }
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(Array(Gesture.allCases.suffix(3))) { tile($0).frame(minWidth: 0, maxWidth: .infinity, alignment: .top) }
+                }
             }
             HStack {
                 Text("默认开启左右歪头和完整点头；左歪头 → 右 ⌥，完整点头 → ↩。关闭的头势不参与识别。").font(.caption).foregroundStyle(.secondary)
@@ -61,30 +69,34 @@ struct GesturesPage: View {
                 if !motion.tracking {
                     CheckLine(ok: false, title: "先戴上耳机", detail: motion.link.detail)
                     Button("重新连接") { motion.reconnect() }
+                } else if motion.calibrating {
+                    Text(motion.calibrationHint).font(.callout).foregroundStyle(.secondary)
+                    ProgressView(value: motion.calibrationProgress)
+                    Button("取消校准") { motion.cancelCalibration() }
                 } else if !motion.calibrated {
-                    Text("正对屏幕坐好、头放正，然后点下面的按钮。").font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(motion.calibrationHint + "。点击校准后保持静止一秒。").font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button { controller.calibrate() } label: { Label("校准正前方", systemImage: "scope").frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).controlSize(.large)
                 } else if let target = controller.testTarget {
                     HStack(spacing: 14) {
                         ZStack {
                             Circle().stroke(Color.secondary.opacity(0.15), lineWidth: 5)
-                            Circle().trim(from: 0, to: Double(passedCount) / Double(max(1, enabledGestures.count))).stroke(Color.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                                .rotationEffect(.degrees(-90)).animation(.spring, value: controller.testPassed.count)
+                            Circle().trim(from: 0, to: Double(controller.practiceCounts[target] ?? 0) / 3).stroke(Color.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                                .rotationEffect(.degrees(-90)).animation(.spring, value: controller.practiceCounts[target] ?? 0)
                             GestureGlyph(gesture: target, size: 20).foregroundStyle(Color.accentColor)
                         }.frame(width: 54, height: 54)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(target.title).font(.headline)
+                            Text("\(target.title) · \(controller.practiceCounts[target] ?? 0)/3 次").font(.headline)
                             Text(target.prompt).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    Text("跟着蓝色虚线转，让实线和它重合。动作干脆一点更容易识别。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("舒适地做三次，每次都回正。练习会记录实际幅度，未达到当前门槛也能收集；全程不发键。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("结束测试") { controller.setTesting(false) }
                 } else {
                     Label("已校准 · \(motion.sensor)", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
-                    Text(enabledGestures.isEmpty ? "先打开至少一个头势，再开始测试。" : "逐个测试已开启的 \(enabledGestures.count) 个头势，测完会按你的实际动作给出建议。测试时不会发送按键。")
+                    Text(enabledGestures.isEmpty ? "先打开至少一个头势，再开始测试。" : "逐个练习已开启的 \(enabledGestures.count) 个头势，每个做三次。幅度相近时给出建议，手动采用后再测试。")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button { controller.startAllTests() } label: { Label("依次测试已开启头势", systemImage: "play.fill").frame(maxWidth: .infinity) }
+                    Button { controller.startAllTests() } label: { Label("依次练习 · 每个三次", systemImage: "play.fill").frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).controlSize(.large)
                         .disabled(enabledGestures.isEmpty)
                     HStack {
@@ -92,7 +104,42 @@ struct GesturesPage: View {
                         if controller.testing { Button("结束测试") { controller.setTesting(false) } }
                     }
                     if !controller.testPassed.isEmpty {
-                        Text("已通过 \(passedCount) / \(enabledGestures.count)").font(.caption).foregroundStyle(.secondary)
+                        Text("当前参数已通过 \(passedCount) / \(enabledGestures.count)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var jointTestCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SectionTitle(title: "联合测试", detail: "所有已开启头势同时识别，用于检查串扰与日常误触。全程不发送按键。")
+                    Spacer()
+                    if controller.jointTesting {
+                        Button("结束联合测试") { controller.setTesting(false) }
+                    } else {
+                        Button("开始联合测试") { controller.startJointTest() }
+                            .disabled(!motion.calibrated || enabledGestures.isEmpty)
+                    }
+                }
+                if controller.jointTesting {
+                    Picker("测试方式", selection: Binding(get: { controller.observingEveryday }, set: { controller.setEverydayObservation($0) })) {
+                        Text("做指令动作").tag(false)
+                        Text("观察日常动作").tag(true)
+                    }.pickerStyle(.segmented)
+                    Text(controller.observingEveryday ? "自然看屏幕、说话或低头。此阶段已识别 \(controller.everydayCount) 次，请判断是否为误触；切换阶段后重新计数。" : "依次做需要使用的头势，核对下面的计数和最近记录，检查是否识别成其他动作。")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if controller.jointTesting || !controller.jointCounts.isEmpty {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), alignment: .leading) {
+                        ForEach(enabledGestures) { gesture in
+                            Label("\(gesture.shortTitle) · \(controller.jointCounts[gesture] ?? 0) 次", systemImage: gesture.symbol).font(.caption)
+                        }
+                    }
+                    if let trigger = controller.jointLastTrigger {
+                        Text(trigger.message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -113,7 +160,7 @@ struct GesturesPage: View {
                 GestureGlyph(gesture: g, size: 15).foregroundStyle(Color.accentColor).frame(width: 20)
                 Text(g.title).font(.headline)
                 if controller.testPassed.contains(g) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).transition(.scale).help("测试已通过")
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).transition(.scale).help("当前识别参数测试已通过")
                 }
                 Spacer()
                 Toggle("启用\(g.title)", isOn: Binding(get: { store.configuration.isEnabled(g) }, set: { value in
@@ -127,13 +174,13 @@ struct GesturesPage: View {
                 Spacer()
                 if isSelected { InfoButton(title: g.title, points: helpPoints(g), help: "说明") }
                 Button { controller.startTest(g) } label: {
-                    Label(testing ? "测试中" : "测试", systemImage: testing ? "waveform" : "play.fill")
+                    Label(testing ? "练习中" : "练习", systemImage: testing ? "waveform" : "play.fill")
                         .symbolEffect(.variableColor.iterative, isActive: testing)
                         .fixedSize()
                 }
                 .controlSize(.small).buttonStyle(.bordered).buttonBorderShape(.capsule)
                 .disabled(!enabled || !motion.calibrated || testing)
-                .help(!enabled ? "先开启这个头势再测试" : motion.calibrated ? "做一次这个头势，测试时不发送按键" : "先在右上方完成校准")
+                .help(!enabled ? "先开启这个头势再测试" : motion.calibrated ? "舒适地做三次这个头势，不发送按键" : "先在右上方完成校准")
             }
             ArcGauge(value: enabled && motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
@@ -145,12 +192,15 @@ struct GesturesPage: View {
             if suggestion != nil {
                 HStack(spacing: 6) {
                     Image(systemName: "lightbulb.fill").foregroundStyle(.orange)
-                    Text("根据测试，建议调整幅度").font(.caption)
+                    Text("三次练习后建议调整参数").font(.caption)
                     Spacer()
                     Button("采用") { controller.applySuggestion(g) }.controlSize(.small)
                 }
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            if let note = controller.practiceNotes[g] {
+                Text(note).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             // Grouped rows like System Settings: the binding is always visible, tuning only on the selected tile.
             VStack(spacing: 0) {

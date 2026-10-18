@@ -6,6 +6,9 @@ import CoreMotion
     @Published private(set) var link: HeadphoneLink = .idle
     @Published private(set) var tracking = false
     @Published private(set) var calibrated = false
+    @Published private(set) var calibrating = false
+    @Published private(set) var calibrationProgress = 0.0
+    @Published private(set) var calibrationHint = "正对屏幕，保持自然坐姿"
     @Published private(set) var pose = MotionSample(time: 0)
     @Published private(set) var sensor = "未知"
     @Published private(set) var authorization = CMHeadphoneMotionManager.authorizationStatus()
@@ -13,6 +16,7 @@ import CoreMotion
     @Published private(set) var walking = false
     var onSample: ((MotionSample) -> Void)?
     var onInvalidation: ((String) -> Void)?
+    var onCalibrationResult: ((String) -> Void)?
     private var manager = CMHeadphoneMotionManager()
     private let activityManager = CMHeadphoneActivityManager()
     private var session = UUID()
@@ -27,8 +31,34 @@ import CoreMotion
     /// Keeps App Nap from throttling sample delivery while the app sits in the background,
     /// which is exactly when gestures are used for real.
     private var activity: NSObjectProtocol?
+    private var usage = MotionUsage()
+    private var pauseWhileWalking = true
+    private var stablePose = StablePoseWindow()
+    private var calibrationStarted: Double?
+    private var suspensionReasons: Set<String> = []
+    private var observers: [NSObjectProtocol] = []
+    private var lockObservers: [NSObjectProtocol] = []
     override init() {
         super.init(); manager.delegate = self
+        let center = NSWorkspace.shared.notificationCenter
+        for (name, reason) in [(NSWorkspace.willSleepNotification, "sleep"), (NSWorkspace.screensDidSleepNotification, "display"), (NSWorkspace.sessionDidResignActiveNotification, "session")] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.suspend(reason: reason) }
+            })
+        }
+        for (name, reason) in [(NSWorkspace.didWakeNotification, "sleep"), (NSWorkspace.screensDidWakeNotification, "display"), (NSWorkspace.sessionDidBecomeActiveNotification, "session")] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.resume(reason: reason) }
+            })
+        }
+        // Distributed lock notifications supplement workspace sleep/session notifications.
+        let distributed = DistributedNotificationCenter.default()
+        lockObservers.append(distributed.addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.suspend(reason: "lock") }
+        })
+        lockObservers.append(distributed.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.resume(reason: "lock") }
+        })
         // Always-on watch: permission changes and data gaps must surface even before the first start().
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -38,6 +68,7 @@ import CoreMotion
     var status: String { link.title }
 
     func start() {
+        guard suspensionReasons.isEmpty else { return }
         guard manager.isDeviceMotionAvailable else { stop(); link = .unavailable; return }
         let auth = CMHeadphoneMotionManager.authorizationStatus()
         authorization = auth
@@ -45,8 +76,6 @@ import CoreMotion
         if tracking || calibrated { onInvalidation?("耳机采集已重新启动，请重新校准") }
         stop()
         started = true; link = .waiting; manager.startConnectionStatusUpdates()
-        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
-                                                         reason: "实时识别耳机头势")
         let token = session
         startActivityServices()
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
@@ -72,14 +101,53 @@ import CoreMotion
         session = UUID()
         manager.stopDeviceMotionUpdates(); manager.stopConnectionStatusUpdates(); started = false
         stopActivityServices()
-        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
+        releaseRealtimeActivity()
+        calibrating = false; calibrationProgress = 0; stablePose.reset(); calibrationStarted = nil
         lastReceived = nil; current = nil; reference = nil; tracking = false; calibrated = false; link = .idle
         lastUI = nil; sensor = "未知"
     }
+    func setUsage(active: Bool, preview: Bool, pauseWhileWalking: Bool) {
+        usage.active = active; usage.preview = preview
+        self.pauseWhileWalking = pauseWhileWalking
+        if active { startActivityServices() } else { stopActivityServices() }
+        refreshResources()
+    }
+    private func refreshResources() {
+        usage.tracking = tracking; usage.calibrating = calibrating
+        usage.walking = walking && pauseWhileWalking; usage.suspended = !suspensionReasons.isEmpty
+        if usage.needsRealtime {
+            if activity == nil {
+                // Protect delivery from App Nap while allowing the Mac to sleep normally.
+                activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical], reason: "实时识别耳机头势")
+            }
+        } else { releaseRealtimeActivity() }
+    }
+    private func releaseRealtimeActivity() {
+        if let activity { ProcessInfo.processInfo.endActivity(activity); self.activity = nil }
+    }
     func recenter() {
-        guard tracking, let copy = current?.copy() as? CMAttitude else { return }
-        onInvalidation?("已重新校准，本轮已退出")
-        reference = copy; calibrated = true; pose = MotionSample(time: ProcessInfo.processInfo.systemUptime)
+        guard tracking, current != nil else { return }
+        onInvalidation?("正在校准，请正对屏幕静止一秒")
+        reference = nil; calibrated = false; calibrating = true; calibrationProgress = 0
+        calibrationStarted = nil; stablePose.reset()
+        calibrationHint = "正对屏幕，保持静止一秒"
+        refreshResources()
+    }
+    func cancelCalibration(hint: String = "校准已取消，请准备好后重试") {
+        guard calibrating else { return }
+        calibrating = false; calibrationProgress = 0; stablePose.reset(); calibrationStarted = nil
+        calibrationHint = hint; refreshResources(); onCalibrationResult?(hint)
+    }
+    func suspend(reason: String) {
+        let first = suspensionReasons.isEmpty
+        suspensionReasons.insert(reason)
+        guard first else { return }
+        onInvalidation?("屏幕休眠、锁屏或会话离开，头势控制已暂停")
+        stop(); link = .interrupted("恢复使用后请重新校准并手动开启控制")
+    }
+    func resume(reason: String) {
+        guard suspensionReasons.remove(reason) != nil, suspensionReasons.isEmpty else { return }
+        if authorized { start() }
     }
     private func poll() {
         let auth = CMHeadphoneMotionManager.authorizationStatus()
@@ -103,11 +171,15 @@ import CoreMotion
         switch motion.sensorLocation { case .headphoneLeft: nextSensor = "左耳"; case .headphoneRight: nextSensor = "右耳"; default: nextSensor = "未知" }
         if nextSensor != sensor {
             if sensor != "未知" {
-                calibrated = false; reference = nil; lastUI = nil
+                calibrated = false; calibrating = false; calibrationProgress = 0
+                stablePose.reset(); calibrationStarted = nil; reference = nil; lastUI = nil; releaseRealtimeActivity()
                 onInvalidation?("数据来源耳机改变，请重新校准")
             }
             sensor = nextSensor
         }
+        if !tracking { tracking = true; if usage.active { startActivityServices(restart: true) }; refreshResources() }
+        if link != .tracking { link = .tracking }
+        guard usage.needsPose else { return }
         guard let relative = motion.attitude.copy() as? CMAttitude else { return }
         if let reference { relative.multiply(byInverseOf: reference) }
         let degrees = 180.0 / Double.pi
@@ -118,16 +190,30 @@ import CoreMotion
         let rate = AxisRates(yaw: -r.z * degrees, pitch: r.x * degrees, roll: r.y * degrees)
         let sample = MotionSample(time: motion.timestamp, yaw: -relative.yaw * degrees, pitch: relative.pitch * degrees,
                                   roll: relative.roll * degrees, rate: rate.finite ? rate : nil)
-        if !tracking { tracking = true; startActivityServices(restart: true) }
-        if link != .tracking { link = .tracking }
+        if calibrating {
+            if calibrationStarted == nil { calibrationStarted = motion.timestamp }
+            let raw = MotionSample(time: motion.timestamp, yaw: -motion.attitude.yaw * degrees, pitch: motion.attitude.pitch * degrees, roll: motion.attitude.roll * degrees, rate: rate.finite ? rate : nil)
+            if stablePose.update(raw) {
+                reference = motion.attitude.copy() as? CMAttitude
+                calibrated = reference != nil; calibrating = false; calibrationProgress = calibrated ? 1 : 0
+                calibrationHint = calibrated ? "校准完成，可开始三次动作练习" : "校准失败，请重试"
+                pose = MotionSample(time: motion.timestamp); refreshResources()
+                onCalibrationResult?(calibrationHint); return
+            }
+            let progress = (stablePose.progress * 20).rounded() / 20
+            if progress != calibrationProgress { calibrationProgress = progress }
+            if motion.timestamp - (calibrationStarted ?? motion.timestamp) > 10 {
+                cancelCalibration(hint: "姿态尚未稳定，请坐稳后重新校准")
+            }
+        }
         if lastUI == nil || sample.time < lastUI! || sample.time - lastUI! >= 0.05 {
             pose = sample; lastUI = sample.time
         }
-        if calibrated { onSample?(sample) }
+        if calibrated && (usage.active || usage.preview) { onSample?(sample) }
     }
 
     private func startActivityServices(restart: Bool = false) {
-        guard started, authorized, activityManager.isActivityAvailable else { return }
+        guard started, usage.active, authorized, activityManager.isActivityAvailable else { return }
         if restart { stopActivityServices() }
         guard !activityListening else { return }
         activityListening = true
@@ -136,7 +222,7 @@ import CoreMotion
             guard let self, self.started, self.activitySession == token else { return }
             // An error or missing reading must never leave gestures suspended.
             let moving = error == nil && (reading?.walking == true || reading?.running == true)
-            if moving != self.walking { self.walking = moving }
+            if moving != self.walking { self.walking = moving; self.refreshResources() }
         }
     }
 
@@ -146,7 +232,9 @@ import CoreMotion
         activityListening = false; walking = false
     }
     private func invalidate(_ reason: String) {
-        tracking = false; calibrated = false; reference = nil; current = nil; lastUI = nil; link = .interrupted(reason); onInvalidation?(reason)
+        tracking = false; calibrated = false; calibrating = false; calibrationProgress = 0
+        stablePose.reset(); calibrationStarted = nil; reference = nil; current = nil; lastUI = nil
+        releaseRealtimeActivity(); stopActivityServices(); link = .interrupted(reason); onInvalidation?(reason)
     }
     nonisolated func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
         Task { @MainActor [weak self] in
