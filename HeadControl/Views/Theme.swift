@@ -3,14 +3,67 @@ import AppKit
 
 @MainActor enum AppTheme {
     static let preferenceKey = "appearanceTheme"
+    /// A whole-window change needs enough time to read, without delaying interaction.
+    static let transitionDuration: TimeInterval = 0.32
+    private static var transitions: [ObjectIdentifier: ThemeTransitionWindow] = [:]
 
-    static func apply(_ value: String) {
+    static func apply(_ value: String, animated: Bool = false) {
+        // Cover the old appearance before AppKit updates its native controls and materials.
+        // Reuse a fading cover on rapid toggles, so they cannot stack or leave a stale cover.
+        var covers: [(ObjectIdentifier, ThemeTransitionWindow)] = []
+        if animated {
+            for window in NSApp.windows where window.isVisible && !window.isMiniaturized && !(window is ThemeTransitionWindow) {
+                let id = ObjectIdentifier(window)
+                guard transitions[id] == nil,
+                      let content = window.contentView,
+                      let image = Snapshot.image(of: content.superview ?? content) else { continue }
+                let cover = ThemeTransitionWindow(contentRect: window.frame, styleMask: .borderless, backing: .buffered, defer: false)
+                cover.isReleasedWhenClosed = false
+                cover.isOpaque = false
+                cover.backgroundColor = .clear
+                cover.hasShadow = false
+                cover.ignoresMouseEvents = true
+                cover.isExcludedFromWindowsMenu = true
+                cover.collectionBehavior = [.transient, .ignoresCycle]
+                let imageView = NSImageView(frame: NSRect(origin: .zero, size: window.frame.size))
+                imageView.image = image
+                imageView.imageScaling = .scaleAxesIndependently
+                imageView.autoresizingMask = [.width, .height]
+                imageView.setAccessibilityElement(false)
+                cover.contentView = imageView
+                // A child window covers the native toolbar without modifying AppKit's frame hierarchy.
+                window.addChildWindow(cover, ordered: .above)
+                transitions[id] = cover
+                covers.append((id, cover))
+            }
+        }
         switch value {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
         default: NSApp.appearance = nil
         }
+        guard !covers.isEmpty else { return }
+        // Give SwiftUI and native toolbar controls one run-loop turn to resolve the new palette.
+        DispatchQueue.main.async {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.12 : transitionDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                for (_, cover) in covers { cover.animator().alphaValue = 0 }
+            } completionHandler: {
+                for (id, cover) in covers {
+                    cover.parent?.removeChildWindow(cover)
+                    cover.close()
+                    if transitions[id] === cover { transitions[id] = nil }
+                }
+            }
+        }
     }
+}
+
+/// The temporary snapshot must never take focus from the real controls underneath it.
+private final class ThemeTransitionWindow: NSWindow {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }
 
 extension HeadphoneLink.Tone {

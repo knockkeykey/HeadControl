@@ -92,13 +92,13 @@ struct SettingsRoot: View {
                 .accessibilityLabel(themeAction)
             }
         }
-        .onChange(of: theme) { _, value in AppTheme.apply(value) }
+        .onChange(of: theme) { _, value in AppTheme.apply(value, animated: true) }
     }
 
     private var themeAction: String { colorScheme == .dark ? "切换到浅色模式" : "切换到深色模式" }
 }
 
-/// Configure only the enclosing detail scroll view, without changing system-wide preferences.
+/// Configure the enclosing scroll view without changing system-wide preferences.
 private struct OverlayScrollbars: NSViewRepresentable {
     let hovering: Bool
 
@@ -147,6 +147,7 @@ private struct OverlayScrollbars: NSViewRepresentable {
 
 struct StatusPage: View {
     @ObservedObject var controller: AppController
+    @State private var hoveringEvents = false
     let go: (SettingsPage) -> Void
     private var motion: MotionService { controller.motion }
     var body: some View {
@@ -205,26 +206,35 @@ struct StatusPage: View {
                             }
                             .frame(maxWidth: .infinity, minHeight: 56)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 228, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 228)
                         VStack(alignment: .leading, spacing: 10) {
                             Divider()
-                            if controller.events.isEmpty {
-                                Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary)
-                                    .frame(maxWidth: .infinity)
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    if controller.events.isEmpty {
+                                        Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary)
+                                            .frame(maxWidth: .infinity)
+                                    }
+                                    ForEach(Array(controller.events.prefix(6).enumerated()), id: \.offset) { _, e in
+                                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                            Text(e.time, format: .dateTime.hour().minute().second()).monospacedDigit().foregroundStyle(.tertiary)
+                                            Text(e.message + (e.count > 1 ? " ×\(e.count)" : "")).textSelection(.enabled)
+                                        }.font(.caption).foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(OverlayScrollbars(hovering: hoveringEvents))
                             }
-                            ForEach(Array(controller.events.prefix(6).enumerated()), id: \.offset) { _, e in
-                                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text(e.time, format: .dateTime.hour().minute().second()).monospacedDigit().foregroundStyle(.tertiary)
-                                    Text(e.message + (e.count > 1 ? " ×\(e.count)" : "")).textSelection(.enabled)
-                                }.font(.caption).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
+                            .onHover { hoveringEvents = $0 }
                         }
+                        .frame(maxHeight: .infinity, alignment: .top)
                     }
                     .frame(maxHeight: .infinity)
                 }
                 .flash(on: controller.lastTrigger?.id, when: true)
-                .frame(width: 290)
+                .frame(width: 290, height: 420)
             }
             .fixedSize(horizontal: false, vertical: true)
         }

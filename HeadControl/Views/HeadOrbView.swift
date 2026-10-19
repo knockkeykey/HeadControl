@@ -13,7 +13,7 @@ struct HeadOrbView: NSViewRepresentable {
 
     func makeCoordinator() -> HeadOrbScene { HeadOrbScene() }
     func makeNSView(context: Context) -> SCNView {
-        let view = SCNView(frame: .zero)
+        let view = HeadOrbSceneView(frame: .zero)
         view.scene = context.coordinator.scene
         view.backgroundColor = .clear
         view.antialiasingMode = .multisampling4X
@@ -34,6 +34,17 @@ struct HeadOrbView: NSViewRepresentable {
                                   ghost: ghost.map { ($0.pitch, $0.yaw, $0.roll) },
                                   status: status, dark: colorScheme == .dark,
                                   showsBodyBackdrop: showsBodyBackdrop)
+    }
+}
+
+/// Keep outgoing rings inside narrow preview cards while preserving the normal head size.
+private final class HeadOrbSceneView: SCNView {
+    override func layout() {
+        super.layout()
+        guard bounds.width > 0, bounds.height > 0, let camera = pointOfView?.camera else { return }
+        camera.projectionDirection = .vertical
+        let aspect = bounds.width / bounds.height
+        camera.fieldOfView = max(30, 2 * atan(2.4 / (7.58 * aspect)) * 180 / .pi)
     }
 }
 

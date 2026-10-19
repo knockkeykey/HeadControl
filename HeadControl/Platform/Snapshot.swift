@@ -9,7 +9,15 @@ import SceneKit
         return URL(fileURLWithPath: CommandLine.arguments[i + 1])
     }
     static func capture(_ window: NSWindow?, to url: URL) {
-        guard let root = window?.contentView, let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { return }
+        guard let root = window?.contentView, let out = image(of: root),
+              let tiff = out.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: url)
+    }
+
+    /// Include GPU-rendered previews when taking a temporary theme-transition snapshot.
+    static func image(of root: NSView) -> NSImage? {
+        guard let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { return nil }
         root.cacheDisplay(in: root.bounds, to: rep)
         let image = NSImage(size: root.bounds.size); image.addRepresentation(rep)
         let out = NSImage(size: root.bounds.size)
@@ -21,8 +29,7 @@ import SceneKit
             scn.snapshot().draw(in: r)
         }
         out.unlockFocus()
-        guard let tiff = out.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
-        try? png.write(to: url)
+        return out
     }
     private static func scenes(in view: NSView) -> [SCNView] {
         (view as? SCNView).map { [$0] } ?? view.subviews.flatMap(scenes)
