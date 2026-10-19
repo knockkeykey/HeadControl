@@ -53,7 +53,8 @@ final class HeadOrbScene {
     private let orb = SCNMaterial()
     private let lines = SCNMaterial()
     private let pod = SCNMaterial()
-    private var halos: [SCNNode] = []
+    private var connectionLights: [SCNNode] = []
+    private var reduceMotion: Bool?
     private var key = SCNNode()
     private var status: Status?
     private var dark: Bool?
@@ -134,7 +135,11 @@ final class HeadOrbScene {
         SCNTransaction.commit()
         if let ghost { ghostPivot.eulerAngles = Self.euler(ghost.0, ghost.1, ghost.2) }
         ghostPivot.isHidden = ghost == nil
-        if self.status != status { self.status = status; show(status) }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if self.status != status || self.reduceMotion != reduceMotion {
+            self.status = status; self.reduceMotion = reduceMotion
+            show(status, reduceMotion: reduceMotion)
+        }
     }
 
     /// The orb faces -Z (away from the camera). Recognizer semantics: nod = pitch < 0, turnRight = yaw > 0, tiltRight = roll > 0.
@@ -238,22 +243,56 @@ final class HeadOrbScene {
         }
     }
 
-    private func show(_ status: Status) {
-        let color: NSColor = switch status {
-        case .off: .systemGray
-        case .warning: .systemOrange
-        case .tracking: .systemGreen
-        case .paused: .systemGray
-        }
-        for halo in halos {
-            halo.geometry?.firstMaterial?.diffuse.contents = color
-            halo.removeAllActions()
-            halo.opacity = status == .paused ? 0.35 : 1
-            if status == .tracking && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                halo.runAction(.repeatForever(.sequence([.fadeOpacity(to: 0.35, duration: 0.9), .fadeOpacity(to: 1, duration: 0.9)])))
+    private func show(_ status: Status, reduceMotion: Bool) {
+        // Connection remains green when shortcut delivery is paused.
+        let connected = status == .tracking || status == .paused
+        let color: NSColor = connected ? .systemGreen : .systemOrange
+        for light in connectionLights {
+            light.removeAllActions()
+            light.isHidden = status == .off
+            light.enumerateChildNodes { node, _ in
+                node.geometry?.firstMaterial?.diffuse.contents = color
+            }
+            // The inner ring is always visible, even between outgoing waves.
+            light.childNodes[0].opacity = 0.9
+            let waves = Array(light.childNodes.dropFirst())
+            Self.placeConnectionWaves(waves, phase: 0, moving: !reduceMotion)
+            for wave in waves { wave.isHidden = !connected }
+            if connected && !reduceMotion {
+                light.runAction(.repeatForever(.customAction(duration: 1.8) { node, elapsed in
+                    Self.placeConnectionWaves(Array(node.childNodes.dropFirst()),
+                                              phase: elapsed / 1.8, moving: true)
+                }))
             }
         }
-        pod.transparency = status == .paused ? 0.6 : 1
+    }
+
+    private static func placeConnectionWaves(_ waves: [SCNNode], phase: CGFloat, moving: Bool) {
+        for (index, wave) in waves.enumerated() {
+            let progress = (phase + CGFloat(index) / CGFloat(waves.count)).truncatingRemainder(dividingBy: 1)
+            let growth = 0.85 + 1.05 * progress
+            wave.position.x = 0.06 + 0.76 * progress
+            wave.scale = SCNVector3(0.45 * growth, growth, 1)
+            // Staggered waves keep both sides readable throughout the cycle.
+            wave.opacity = moving ? 0.85 * (1 - progress) : 0.8 - 0.5 * progress
+        }
+    }
+
+    /// A crisp green ring with a wider translucent rim, legible on the white grid without HDR bloom.
+    private static func connectionRing() -> SCNNode {
+        let root = SCNNode()
+        for (width, opacity): (CGFloat, CGFloat) in [(0.032, 0.12), (0.012, 1)] {
+            let ring = SCNTorus(ringRadius: 0.25, pipeRadius: width)
+            ring.ringSegmentCount = 80; ring.pipeSegmentCount = 8
+            let material = SCNMaterial(); material.lightingModel = .constant
+            material.writesToDepthBuffer = false
+            ring.firstMaterial = material
+            let node = SCNNode(geometry: ring)
+            node.eulerAngles.x = .pi / 2
+            node.opacity = opacity
+            root.addChildNode(node)
+        }
+        return root
     }
 
     /// AirPods Pro deliberately visible along the head's side silhouette.
@@ -269,12 +308,16 @@ final class HeadOrbScene {
         stem.position = SCNVector3(0.025 * side, -0.30, 0.015)
         stem.eulerAngles = SCNVector3(-0.18, 0, -0.10 * side)
         root.addChildNode(stem)
-        // Status light: a small glowing dot on the bud's outer face.
-        let dot = SCNSphere(radius: 0.055)
-        let dotMaterial = SCNMaterial(); dotMaterial.lightingModel = .constant; dot.firstMaterial = dotMaterial
-        let halo = SCNNode(geometry: dot)
-        halo.position = SCNVector3(0.19 * side, 0.03, 0.04); halo.scale = SCNVector3(0.5, 1, 1)
-        root.addChildNode(halo); halos.append(halo)
+        // Mirror the emitter so rings travel away from each ear and follow the head's pose.
+        let light = SCNNode()
+        light.position = SCNVector3(0.22 * side, 0.03, 0.30)
+        light.scale.x = side
+        let steady = Self.connectionRing()
+        steady.position.x = 0.015; steady.scale = SCNVector3(0.45, 0.85, 1)
+        light.addChildNode(steady)
+        for _ in 0..<3 { light.addChildNode(Self.connectionRing()) }
+        light.isHidden = true
+        root.addChildNode(light); connectionLights.append(light)
         return root
     }
 
