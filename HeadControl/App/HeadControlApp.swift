@@ -45,8 +45,7 @@ import Combine
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: defaultSize), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.delegate = self
             window.title = "头势控制"; window.contentMinSize = NSSize(width: 900, height: 660)
-            window.titleVisibility = .hidden
-            window.toolbarStyle = .unified
+            SettingsWindow.configure(window)
             window.contentViewController = NSHostingController(rootView: root)
             // Hosting can reset the initial content rect to the SwiftUI minimum size.
             window.setContentSize(defaultSize)

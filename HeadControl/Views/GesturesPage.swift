@@ -6,6 +6,7 @@ struct GesturesPage: View {
     var showStatus: () -> Void = {}
     @State private var selected: Gesture = .tiltLeft
     @State private var recording: Gesture?
+    @State private var choosingApplication: Gesture?
     private var motion: MotionService { controller.motion }
     private var enabledGestures: [Gesture] { store.configuration.enabledGestures }
     private var passedCount: Int { controller.testPassed.intersection(enabledGestures).count }
@@ -33,7 +34,9 @@ struct GesturesPage: View {
             if let gesture = recording {
                 Card {
                     ShortcutRecorderPanel(gesture: gesture, save: { shortcut in
-                        store.configuration.set(GestureBinding(.shortcut, shortcut: shortcut), for: gesture)
+                        var binding = store.configuration.binding(gesture)
+                        binding.action = .shortcut; binding.shortcut = shortcut
+                        store.configuration.set(binding, for: gesture)
                         withAnimation(.spring(duration: 0.35)) { recording = nil }
                     }, cancel: { withAnimation(.spring(duration: 0.35)) { recording = nil } })
                 }
@@ -53,11 +56,22 @@ struct GesturesPage: View {
             HStack {
                 Text("默认开启左右歪头和完整点头；左歪头 → 右 ⌥，完整点头 → ↩。关闭的头势不参与识别。").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("恢复默认按键") { store.configuration.bindings = Configuration.defaultBindings }
+                Button("恢复默认动作") { store.configuration.bindings = Configuration.defaultBindings }
             }
         }
         .onAppear { controller.setPreviewVisible(true, surface: "gestures") }
-        .onDisappear { controller.setPreviewVisible(false, surface: "gestures") }
+        .onDisappear {
+            controller.setPreviewVisible(false, surface: "gestures")
+            choosingApplication = nil; controller.setSelectingApplication(false)
+        }
+        .sheet(item: $choosingApplication, onDismiss: { controller.setSelectingApplication(false) }) { gesture in
+            ApplicationPicker(gesture: gesture, initialTarget: store.configuration.binding(gesture).application, select: { target in
+                var binding = store.configuration.binding(gesture)
+                binding.action = .application; binding.application = target
+                store.configuration.set(binding, for: gesture)
+                choosingApplication = nil
+            }, cancel: { choosingApplication = nil })
+        }
     }
 
     private var startControlPrompt: some View {
@@ -66,7 +80,7 @@ struct GesturesPage: View {
                 Image(systemName: "pause.circle.fill").font(.title2).foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("头势控制未启动").font(.headline)
-                    Text("这里仍可查看达标效果、听提醒音。点击启动后，头势才会执行快捷键。")
+                    Text("这里仍可查看达标效果、听提醒音。点击启动后，头势才会执行动作。")
                         .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     if !controller.readyToEnable {
                         Text(!motion.calibrated ? "请先连接耳机并校准正前方。" : "请先到“状态”页授予辅助功能权限。")
@@ -131,7 +145,7 @@ struct GesturesPage: View {
                     Text("\(target.title) · \(controller.practiceCounts[target] ?? 0)/3 次").font(.headline)
                     Text(target.prompt).font(.callout).foregroundStyle(.secondary)
                 }
-                Text("舒适地做三次，每次都回正。练习会记录实际幅度，未达到当前门槛也能收集；全程不发键。")
+                Text("舒适地做三次，每次都回正。练习会记录实际幅度，未达到当前门槛也能收集；全程不执行动作。")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 Image(systemName: "checkmark.circle.fill").font(.system(size: 36)).foregroundStyle(.green)
@@ -178,7 +192,7 @@ struct GesturesPage: View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    SectionTitle(title: "联合测试", detail: "所有已开启头势同时识别，用于检查串扰与日常误触。全程不发送按键。")
+                    SectionTitle(title: "联合测试", detail: "所有已开启头势同时识别，用于检查串扰与日常误触。全程不执行动作。")
                     Spacer()
                     if controller.jointTesting {
                         Button("结束联合测试") { controller.setTesting(false) }
@@ -243,7 +257,7 @@ struct GesturesPage: View {
                 }
                 .controlSize(.small).buttonStyle(.bordered).buttonBorderShape(.capsule)
                 .disabled(!enabled || !motion.calibrated || testing)
-                .help(!enabled ? "先开启这个头势再测试" : motion.calibrated ? "舒适地做三次这个头势，不发送按键" : "先在右上方完成校准")
+                .help(!enabled ? "先开启这个头势再测试" : motion.calibrated ? "舒适地做三次这个头势，不执行动作" : "先在右上方完成校准")
             }
             ArcGauge(value: enabled && motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
@@ -295,47 +309,93 @@ struct GesturesPage: View {
     private func actionRow(_ g: Gesture) -> some View {
         let binding = store.configuration.binding(g)
         let firing = controller.lastTrigger?.gesture == g
-        return settingRow("执行") {
-            Spacer(minLength: 4)
-            switch binding.action {
-            case .shortcut:
-                if let s = binding.shortcut {
-                    Button { beginRecording(g) } label: {
-                        KeycapRow(caps: s.caps, size: 11, pressed: firing && controller.lastTrigger?.executed == true)
+        return Group {
+            if binding.action == .application {
+                ViewThatFits(in: .horizontal) {
+                    settingRow("执行", labelWidth: 32) {
+                        Spacer(minLength: 0)
+                        applicationButton(g).fixedSize()
+                        actionMenu(g)
                     }
-                    .buttonStyle(.plain).help("点按键帽重新录制").accessibilityLabel("为\(g.title)重新录制快捷键")
-                } else {
-                    Button("录制快捷键…") { beginRecording(g) }.controlSize(.small)
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack { Text("执行").font(.callout); Spacer(); actionMenu(g) }
+                        applicationButton(g).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
                 }
-            case .pause:
-                Text("暂停头势控制").font(.callout)
-            case .disabled:
-                Text("不操作").font(.callout).foregroundStyle(.secondary)
-            }
-            Menu {
-                Picker("执行", selection: actionBinding(g)) { ForEach(ActionKind.allCases) { Text($0.title).tag($0) } }
-                    .pickerStyle(.inline).labelsHidden()
-                if binding.action == .shortcut {
-                    Divider()
-                    Button("重新录制快捷键…") { beginRecording(g) }
+            } else {
+                settingRow("执行") {
+                    Spacer(minLength: 4)
+                    switch binding.action {
+                    case .application:
+                        EmptyView()
+                    case .shortcut:
+                        if let s = binding.shortcut {
+                            Button { beginRecording(g) } label: {
+                                KeycapRow(caps: s.caps, size: 11, pressed: firing && controller.lastTrigger?.executed == true)
+                            }
+                            .buttonStyle(.plain).help("点按键帽重新录制").accessibilityLabel("为\(g.title)重新录制快捷键")
+                        } else {
+                            Button("录制快捷键…") { beginRecording(g) }.controlSize(.small)
+                        }
+                    case .previousApplication:
+                        Text("切换到上一个应用").font(.callout)
+                    case .pause:
+                        Text("暂停头势控制").font(.callout)
+                    case .disabled:
+                        Text("不操作").font(.callout).foregroundStyle(.secondary)
+                    }
+                    actionMenu(g)
                 }
-            } label: {
-                Image(systemName: "chevron.up.chevron.down")
             }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("更改这个头势的动作").accessibilityLabel("更改\(g.title)的动作")
         }
         .frame(minHeight: 34)
+    }
+
+    private func applicationButton(_ g: Gesture) -> some View {
+        let target = store.configuration.binding(g).application
+        return Button { beginChoosingApplication(g) } label: {
+            if let target { ApplicationTargetLabel(target: target).font(.callout) }
+            else { Text("选择应用…") }
+        }
+        .buttonStyle(.plain).help("选择要切换到的应用").accessibilityLabel("为\(g.title)选择应用")
+        .accessibilityValue(target?.name ?? "尚未选择")
+    }
+
+    private func actionMenu(_ g: Gesture) -> some View {
+        let binding = store.configuration.binding(g)
+        return Menu {
+            Picker("执行", selection: actionBinding(g)) { ForEach(ActionKind.allCases) { Text($0.title).tag($0) } }
+                .pickerStyle(.inline).labelsHidden()
+            if binding.action == .shortcut {
+                Divider()
+                Button("重新录制快捷键…") { beginRecording(g) }
+            } else if binding.action == .application {
+                Divider()
+                Button("更换应用…") { beginChoosingApplication(g) }
+            }
+        } label: {
+            Image(systemName: "chevron.up.chevron.down")
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("更改这个头势的动作").accessibilityLabel("更改\(g.title)的动作")
     }
 
     private func beginRecording(_ g: Gesture) {
         controller.setEnabled(false)
         withAnimation(.spring(duration: 0.35)) { recording = g; selected = g }
     }
+    private func beginChoosingApplication(_ g: Gesture) {
+        recording = nil; selected = g
+        controller.setSelectingApplication(true)
+        choosingApplication = g
+    }
     private func actionBinding(_ g: Gesture) -> Binding<ActionKind> {
         Binding(get: { store.configuration.binding(g).action }, set: { action in
             var b = store.configuration.binding(g); b.action = action
-            if action == .shortcut, b.shortcut == nil { beginRecording(g) } else { store.configuration.set(b, for: g) }
+            if action == .application { beginChoosingApplication(g) }
+            else if action == .shortcut, b.shortcut == nil { beginRecording(g) }
+            else { store.configuration.set(b, for: g) }
         })
     }
 

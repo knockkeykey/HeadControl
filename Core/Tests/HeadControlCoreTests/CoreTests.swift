@@ -279,7 +279,7 @@ final class ConfigurationTests: XCTestCase {
         json["version"]=1; json.removeValue(forKey:"bindings")
         json["profiles"]=[["id":"com.tencent.xinWeChat","bindings":["ready.nod":["action":"submit"]]]]
         let migrated=try Configuration.decode(JSONSerialization.data(withJSONObject:json))
-        XCTAssertEqual(migrated.version,5); XCTAssertFalse(migrated.sound)
+        XCTAssertEqual(migrated.version,6); XCTAssertFalse(migrated.sound)
         XCTAssertEqual(migrated.tuning[Gesture.nod.rawValue]?.angle,26)
         XCTAssertEqual(migrated.binding(.nod).shortcut,.returnKey)
     }
@@ -299,7 +299,7 @@ final class ConfigurationTests: XCTestCase {
         }
         json["tuning"]=tuning
         let migrated=try Configuration.decode(JSONSerialization.data(withJSONObject:json))
-        XCTAssertEqual(migrated.version,5); XCTAssertTrue(migrated.pauseWhileWalking)
+        XCTAssertEqual(migrated.version,6); XCTAssertTrue(migrated.pauseWhileWalking)
         XCTAssertEqual(migrated.tuning[Gesture.tiltLeft.rawValue]?.speed,130)
         XCTAssertEqual(migrated.tuning[Gesture.turnLeft.rawValue]?.speed,110)
         XCTAssertEqual(migrated.tuning[Gesture.turnLeft.rawValue]?.cooldown,2.2)
@@ -341,14 +341,14 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(migrated, source)
     }
     func testInvalidAndNewerConfigurationsRejected() throws {
-        var c=Configuration(); c.version=6; XCTAssertThrowsError(try c.encoded())
+        var c=Configuration(); c.version=7; XCTAssertThrowsError(try c.encoded())
         c=Configuration(); c.tuning[Gesture.nod.rawValue]?.angle = .nan; XCTAssertThrowsError(try c.encoded())
         c=Configuration(); c.bindings.removeValue(forKey:Gesture.nod.rawValue); XCTAssertFalse(c.isValid)
         c=Configuration(); c.set(.init(.shortcut),for:.shake); XCTAssertFalse(c.isValid)
         c=Configuration(); c.set(.init(.shortcut,shortcut:.init(keyCode:200,label:"invalid")),for:.shake); XCTAssertFalse(c.isValid)
         XCTAssertThrowsError(try Configuration.decode(Data("{}".utf8)))
         var json=try XCTUnwrap(JSONSerialization.jsonObject(with:Configuration().encoded()) as? [String:Any])
-        json["version"]=6
+        json["version"]=7
         XCTAssertThrowsError(try Configuration.decode(JSONSerialization.data(withJSONObject:json)))
     }
     func testGlobalPresetHasNoApplicationOrSessionRequirements() {

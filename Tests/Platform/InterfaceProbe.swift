@@ -1,10 +1,20 @@
 import AppKit
 import SwiftUI
 
+@MainActor private final class InterfaceApplications: ApplicationSwitching {
+    func previousApplication(excluding frontmost: pid_t?) -> ApplicationTarget? { nil }
+    func switchTo(_ target: ApplicationTarget, isAllowed: @escaping @MainActor () -> Bool) async throws {
+        guard isAllowed() else { throw CancellationError() }
+        if CommandLine.arguments.contains("application-hud-failure") { throw ApplicationSwitchError.missing }
+        Trace.events.append("application:\(target.name)")
+    }
+}
+
 /// Exercises production views with synthetic motion and no hardware, audio, key sending or user configuration writes.
 @MainActor final class InterfaceProbeDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var controller: AppController?
+    private var overlay: OverlayController?
     private let directory = FileManager.default.temporaryDirectory.appendingPathComponent("headcontrol-ui-\(UUID())")
     func applicationDidFinishLaunching(_ notification: Notification) {
         let scenario = CommandLine.arguments.dropFirst().first ?? "navigation"
@@ -14,7 +24,15 @@ import SwiftUI
             do { store.configuration = try Configuration.decode(data) }
             catch { fatalError("Invalid interface fixture configuration") }
         }
-        let controller = AppController(store: store); self.controller = controller
+        let controller = AppController(store: store, applications: InterfaceApplications()); self.controller = controller
+        if scenario.hasPrefix("application") {
+            let target = ApplicationTarget(name: ["application-long", "application-hud-failure"].contains(scenario) ? "用于检查长名称换行的目标应用 Application Name" : "文本编辑", path: "/System/Applications/TextEdit.app", bundleIdentifier: "com.apple.TextEdit")
+            store.configuration.set(.init(.application, shortcut: .rightOption, application: target), for: .tiltLeft)
+        }
+        if scenario.hasPrefix("application-hud") {
+            let overlay = OverlayController(controller: controller); self.overlay = overlay
+            controller.overlayChanged = { [weak overlay] in overlay?.sync() }
+        }
         controller.setPreviewVisible(true, surface: "settings")
         var time = 0.0
         func feed(_ seconds: Double, roll: Double = 0, pitch: Double = 0) {
@@ -24,8 +42,11 @@ import SwiftUI
                 controller.motion.pose = sample; controller.motion.onSample?(sample)
             }
         }
-        NSApp.appearance = NSAppearance(named: ["joint", "preview-normal"].contains(scenario) ? .aqua : .darkAqua)
+        NSApp.appearance = NSAppearance(named: ["joint", "preview-normal", "application-picker-light"].contains(scenario) ? .aqua : .darkAqua)
         switch scenario {
+        case "application-feedback", "application-hud", "application-hud-failure":
+            controller.setEnabled(true)
+            feed(0.3); feed(0.6, roll: -30)
         case "calibration-reminder", "calibration-reminder-start", "calibration-reminder-later":
             controller.motion.calibrated = false
         case "practice":
@@ -41,14 +62,28 @@ import SwiftUI
             controller.calibrate(); controller.motion.calibrationProgress = 0.55
         default: break
         }
-        let size = scenario == "preview-normal" ? NSSize(width: 1240, height: 860) : NSSize(width: 900, height: 660)
+        let size = ["preview-normal", "application-row-normal"].contains(scenario) ? NSSize(width: 1240, height: 860) : NSSize(width: 900, height: 660)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "头势控制 · 界面检查"
-        window.contentViewController = NSHostingController(rootView: SettingsRoot(controller: controller))
-        window.setContentSize(size)
+        if scenario.hasPrefix("application-hud") {
+            window.contentViewController = NSHostingController(rootView: StatusHUD(controller: controller))
+            window.setContentSize(NSSize(width: 360, height: 120))
+        } else if scenario.hasPrefix("application-picker") {
+            controller.setSelectingApplication(true)
+            window.contentViewController = NSHostingController(rootView: ApplicationPicker(gesture: .tiltLeft, initialTarget: store.configuration.binding(.tiltLeft).application,
+                select: { target in
+                    var binding = store.configuration.binding(.tiltLeft); binding.application = target
+                    store.configuration.set(binding, for: .tiltLeft); controller.setSelectingApplication(false)
+                }, cancel: { controller.setSelectingApplication(false) }))
+            window.setContentSize(NSSize(width: 520, height: 550))
+        } else {
+            SettingsWindow.configure(window)
+            window.contentViewController = NSHostingController(rootView: SettingsRoot(controller: controller))
+            window.setContentSize(size)
+        }
         window.center(); window.makeKeyAndOrderFront(nil); self.window = window
         NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
-        if scenario == "navigation" { return }
+        if scenario == "navigation" || scenario == "application-interactive" { return }
         Task { @MainActor in
             if scenario.hasPrefix("preview") {
                 try? await Task.sleep(for: .milliseconds(100))
@@ -60,9 +95,12 @@ import SwiftUI
                         fatalError("Status page did not recognize synthetic motion while paused")
                     }
                 }
-                if scenario == "preview-details", let content = window.contentView {
-                    func scrollViews(_ view: NSView) -> [NSScrollView] {
-                        (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+            }
+            if ["preview-details", "application-row", "application-row-normal", "application-long"].contains(scenario) {
+                if let content = window.contentView {
+                    @MainActor func scrollViews(_ view: NSView) -> [NSScrollView] {
+                        if let scroll = view as? NSScrollView { return [scroll] }
+                        return view.subviews.flatMap(scrollViews)
                     }
                     if let scroll = scrollViews(content).max(by: { $0.bounds.width < $1.bounds.width }) {
                         scroll.documentView?.scroll(NSPoint(x: 0, y: 430))
@@ -91,7 +129,15 @@ import SwiftUI
                     }
                 }
             }
-            Snapshot.capture(window.attachedSheet ?? window, to: URL(fileURLWithPath: output))
+            if scenario.hasPrefix("application-hud") {
+                self.overlay?.sync()
+                guard let panel = NSApp.windows.first(where: { $0 is NSPanel && $0.level == .floating && $0.isVisible }),
+                      !panel.canBecomeKey, let content = panel.contentView,
+                      panel.frame.height >= content.fittingSize.height - 1 else { fatalError("HUD clipped its action feedback or can steal focus") }
+                Snapshot.capture(panel, to: URL(fileURLWithPath: output))
+            } else {
+                Snapshot.capture(window.attachedSheet ?? window, to: URL(fileURLWithPath: output))
+            }
             controller.showCalibrationReminder = false
             try? await Task.sleep(for: .milliseconds(150))
             controller.shutdown(); try? FileManager.default.removeItem(at: directory)

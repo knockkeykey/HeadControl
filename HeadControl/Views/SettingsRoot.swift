@@ -9,7 +9,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .status: "按清单完成准备，点击“启动头势控制”就能开始使用。"
-        case .gestures: "开启需要的头势，再选择按键。小球背对着你，拖动圆弧上的圆点调整动作幅度。"
+        case .gestures: "开启需要的头势，再选择动作。小球背对着你，拖动圆弧上的圆点调整动作幅度。"
         case .general: "悬浮条、提示音、走动暂停和程序坞图标。"
         }
     }
@@ -21,6 +21,7 @@ struct SettingsRoot: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var page: SettingsPage? = SettingsRoot.initialPage
     @State private var hoveringContent = false
+    @State private var columns: NavigationSplitViewVisibility = .all
     static var initialPage: SettingsPage {
         if let i = CommandLine.arguments.firstIndex(of: "--page"), CommandLine.arguments.indices.contains(i + 1),
            let p = SettingsPage(rawValue: CommandLine.arguments[i + 1]) { return p }
@@ -37,7 +38,7 @@ struct SettingsRoot: View {
             }
     }
     private var split: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             VStack(spacing: 0) {
                 List(SettingsPage.allCases, selection: $page) { item in
                     HStack {
@@ -57,7 +58,15 @@ struct SettingsRoot: View {
                     }
                     Spacer()
                 }.padding(14)
-            }.navigationSplitViewColumnWidth(min: 190, ideal: 205, max: 230)
+            }
+            .overlay(alignment: .topTrailing) {
+                // Shares the title bar row with the traffic lights; the window has no toolbar.
+                HStack(spacing: 2) { themeButton; sidebarButton }
+                    .frame(height: SettingsWindow.titleBarHeight)
+                    .padding(.trailing, 10)
+                    .offset(y: -SettingsWindow.titleBarHeight)
+            }
+            .navigationSplitViewColumnWidth(min: 190, ideal: 205, max: 230)
         } detail: {
             let current = page ?? .status
             ScrollView {
@@ -77,25 +86,69 @@ struct SettingsRoot: View {
             }
             .onHover { hoveringContent = $0 }
             .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(alignment: .topLeading) {
+                // With the sidebar collapsed, keep the controls beside the traffic lights.
+                if columns == .detailOnly {
+                    HStack(spacing: 2) { sidebarButton; themeButton }
+                        .frame(height: SettingsWindow.titleBarHeight)
+                        .padding(.leading, 78)
+                        .offset(y: -SettingsWindow.titleBarHeight)
+                }
+            }
+            .toolbar(removing: .sidebarToggle)
         }
         .navigationSplitViewStyle(.balanced)
-        .toolbar {
-            ToolbarItemGroup(placement: .automatic) {
-                Spacer()
-                Button {
-                    theme = colorScheme == .dark ? "light" : "dark"
-                } label: {
-                    Label(themeAction, systemImage: colorScheme == .dark ? "sun.max" : "moon")
-                }
-                .labelStyle(.iconOnly)
-                .help(themeAction)
-                .accessibilityLabel(themeAction)
-            }
-        }
+        .toolbar(.hidden, for: .windowToolbar)
         .onChange(of: theme) { _, value in AppTheme.apply(value, animated: true) }
     }
 
     private var themeAction: String { colorScheme == .dark ? "切换到浅色模式" : "切换到深色模式" }
+    private var sidebarAction: String { columns == .detailOnly ? "显示侧边栏" : "隐藏侧边栏" }
+
+    private var themeButton: some View {
+        SidebarIconButton(symbol: colorScheme == .dark ? "sun.max" : "moon", label: themeAction) {
+            theme = colorScheme == .dark ? "light" : "dark"
+        }
+    }
+
+    private var sidebarButton: some View {
+        SidebarIconButton(symbol: "sidebar.left", label: sidebarAction) {
+            withAnimation { columns = columns == .detailOnly ? .all : .detailOnly }
+        }
+    }
+}
+
+/// Window chrome shared by the app and interface probes: no toolbar, content under the title bar.
+@MainActor enum SettingsWindow {
+    static let titleBarHeight: CGFloat = 28
+    static func configure(_ window: NSWindow) {
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.toolbar = nil
+    }
+}
+
+private struct SidebarIconButton: View {
+    let symbol: String
+    let label: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .regular))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(hovering ? 0.08 : 0)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(label)
+        .accessibilityLabel(label)
+    }
 }
 
 /// Configure the enclosing scroll view without changing system-wide preferences.
@@ -179,9 +232,9 @@ struct StatusPage: View {
                 .buttonStyle(ControlLaunchButtonStyle(running: controller.enabled))
                 .disabled(!controller.readyToEnable && !controller.enabled)
                 .padding(.top, 20)
-                .accessibilityHint(controller.enabled ? "停止通过头势触发快捷键" : "启动后，做头势即可触发设定的快捷键")
-                Text(controller.enabled ? (controller.walkingPaused ? "走动时暂停识别，停下后自动恢复。" : "正在运行，做头势即可触发设定的快捷键。") :
-                        (controller.readyToEnable ? "点击上方按钮，开始用头势触发快捷键。" : "请先完成下方准备清单，再点击启动。"))
+                .accessibilityHint(controller.enabled ? "停止通过头势执行动作" : "启动后，做头势即可执行设定的动作")
+                Text(controller.enabled ? (controller.walkingPaused ? "走动时暂停识别，停下后自动恢复。" : "正在运行，做头势即可执行设定的动作。") :
+                        (controller.readyToEnable ? "点击上方按钮，开始用头势执行动作。" : "请先完成下方准备清单，再点击启动。"))
                     .font(.callout).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.top, 8)
@@ -304,7 +357,7 @@ struct ReadinessChecklist: View {
                     detail: motion.calibrated ? "可随时重新校准" : motion.calibrationHint, ok: motion.calibrated,
                     action: motion.tracking ? (motion.calibrating ? "取消" : "校准", { if motion.calibrating { motion.cancelCalibration() } else { controller.calibrate() } }) : nil, keepActionWhenDone: true)
                 Divider().padding(.leading, 46)
-                row(icon: "keyboard", color: .indigo, title: "设置头势按键",
+                row(icon: "keyboard", color: .indigo, title: "设置头势动作",
                     detail: "已开启并绑定 \(bound) 个头势", ok: bound > 0,
                     action: ("编辑", { go(.gestures) }), keepActionWhenDone: true)
                 Text("不需要麦克风、蓝牙、屏幕录制或网络。").font(.caption).foregroundStyle(.tertiary).padding(.top, 10)
@@ -353,6 +406,7 @@ struct LastTriggerView: View {
                         Text(trigger.gesture.title).font(.callout.weight(.medium))
                         if !trigger.caps.isEmpty { KeycapRow(caps: trigger.caps, size: 11) }
                     }
+                    if let target = trigger.application { ApplicationTargetLabel(target: target).font(.callout) }
                     Text(trigger.outcome.title).font(.caption.weight(.medium))
                         .foregroundStyle(trigger.outcome == .skipped ? .orange : .secondary)
                     if trigger.outcome == .skipped {
@@ -379,7 +433,7 @@ struct GeneralPage: View {
         VStack(alignment: .leading, spacing: 14) {
             Card {
                 VStack(alignment: .leading, spacing: 14) {
-                    toggleRow("悬浮状态条", "开启时在屏幕顶部显示最近的头势和按键", "rectangle.topthird.inset.filled", $store.configuration.overlay)
+                    toggleRow("悬浮状态条", "开启时在屏幕顶部显示最近的头势和动作", "rectangle.topthird.inset.filled", $store.configuration.overlay)
                     Divider()
                     toggleRow("提示音", "每完成一个头势都会响一声，可在“头势”页为每个头势选择不同声音", "speaker.wave.2", $store.configuration.sound)
                     Divider()

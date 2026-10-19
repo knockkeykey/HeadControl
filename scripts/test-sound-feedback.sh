@@ -7,6 +7,7 @@ trap 'rm -rf "$probe_root"' EXIT
 controller_source="${HEADCONTROL_CONTROLLER_SOURCE:-$task_root/HeadControl/App/AppController.swift}"
 xcrun swiftc -parse-as-library "$task_root/Tests/Platform/SoundFeedbackProbe.swift" \
   "$controller_source" "$task_root/HeadControl/Platform/ConfigurationStore.swift" \
+  "$task_root/HeadControl/Platform/ApplicationSwitcher.swift" \
   "$task_root"/Core/Sources/HeadControlCore/*.swift -o "$probe_root/controller"
 "$probe_root/controller"
 xcrun swiftc -parse-as-library "$task_root/Tests/Platform/SoundRecoveryProbe.swift" \

@@ -2,12 +2,13 @@ import AppKit
 import Combine
 
 enum TriggerOutcome: Equatable {
-    case sent, skipped, preview, idlePreview, unbound, paused
+    case sent, switched, skipped, preview, idlePreview, unbound, paused
     var title: String {
         switch self {
         case .sent: "已识别，已发键"
+        case .switched: "已识别，已切换应用"
         case .skipped: "已识别，跳过执行"
-        case .preview: "测试识别，未发键"
+        case .preview: "测试识别，未执行动作"
         case .idlePreview: "已达标，未启动控制"
         case .unbound: "已识别，未设置动作"
         case .paused: "已暂停头势控制"
@@ -20,7 +21,8 @@ struct Trigger: Equatable {
     let caps: [String]
     let outcome: TriggerOutcome
     let message: String
-    var executed: Bool { outcome == .sent || outcome == .paused }
+    var application: ApplicationTarget? = nil
+    var executed: Bool { outcome == .sent || outcome == .switched || outcome == .paused }
 }
 struct FeedbackEvent: Identifiable, Equatable {
     let id = UUID()
@@ -33,8 +35,10 @@ struct FeedbackEvent: Identifiable, Equatable {
     let store: ConfigurationStore
     let motion = MotionService()
     let keys = KeySender()
+    private let applications: any ApplicationSwitching
     @Published private(set) var enabled = false
     @Published private(set) var testing = false
+    @Published private(set) var selectingApplication = false
     @Published var showCalibrationReminder = false
     @Published private(set) var notice = "先连接耳机并校准，再开启头势控制"
     @Published private(set) var lastTrigger: Trigger?
@@ -78,7 +82,7 @@ struct FeedbackEvent: Identifiable, Equatable {
     private let feedback = SoundFeedback()
     private var cancellables: Set<AnyCancellable> = []
     var overlayChanged: (() -> Void)?
-    var statusTitle: String { walkingPaused ? "走动中 · 已暂停" : jointTesting ? "联合测试 · 不发键" : testing ? "正在练习头势" : enabled ? "头势控制已开启" : "已暂停" }
+    var statusTitle: String { selectingApplication ? "选择应用中 · 暂停执行" : walkingPaused ? "走动中 · 已暂停" : jointTesting ? "联合测试 · 不执行动作" : testing ? "正在练习头势" : enabled ? "头势控制已开启" : "已暂停" }
     /// Gestures are suspended, not disabled: control resumes by itself once walking stops.
     var walkingPaused: Bool { motion.walking && store.configuration.pauseWhileWalking && (enabled || testing) }
     /// Both AX and post-event access are presented as one "辅助功能" permission.
@@ -86,8 +90,9 @@ struct FeedbackEvent: Identifiable, Equatable {
     var permissionsReady: Bool { motion.authorized && controlTrusted }
     var readyToEnable: Bool { motion.tracking && motion.calibrated && controlTrusted }
 
-    init(store: ConfigurationStore) {
+    init(store: ConfigurationStore, applications: (any ApplicationSwitching)? = nil) {
         self.store = store
+        self.applications = applications ?? ApplicationSwitcher()
         previousConfiguration = store.configuration
         store.onChange = { [weak self] in
             guard let self else { return }
@@ -188,7 +193,15 @@ struct FeedbackEvent: Identifiable, Equatable {
         guard keys.canPost else { notice = "请先在“状态”页的准备清单里授予辅助功能"; return }
         stopTest(); testing = false; enabled = true; suspended = false; router.setMode(.active)
         clearTransientFeedback(); syncMotionUsage()
-        notice = "已开启：做头势会点按对应快捷键"
+        notice = "已开启：做头势会执行对应动作"
+        overlayChanged?()
+    }
+    /// Keep enabled/testing state intact; invalidate both partial recognition and queued work.
+    func setSelectingApplication(_ value: Bool) {
+        guard selectingApplication != value else { return }
+        selectingApplication = value
+        router.configurationChanged(); keys.release()
+        gestureStatus = [:]; clearTransientFeedback(); practice?.interrupt(); attemptRecognized = false
         overlayChanged?()
     }
     func setTesting(_ value: Bool) {
@@ -196,7 +209,7 @@ struct FeedbackEvent: Identifiable, Equatable {
         clearTransientFeedback()
         if !value { stopTest() }
         syncMotionUsage()
-        notice = value ? "练习中，请舒适地完成三次动作，不会发送快捷键" : "测试已结束，头势控制保持暂停"
+        notice = value ? "练习中，请舒适地完成三次动作，不会执行动作" : "测试已结束，头势控制保持暂停"
         overlayChanged?()
     }
     private func updateCalibrationReminder() {
@@ -237,14 +250,14 @@ struct FeedbackEvent: Identifiable, Equatable {
         guard !store.configuration.enabledGestures.isEmpty, motion.calibrated else { return }
         setTesting(true); stopTest(); jointTesting = true
         jointCounts.removeAll(); everydayCount = 0; jointLastTrigger = nil; testPassed.removeAll()
-        notice = "所有已开启头势同时识别。先做指令动作，再观察日常动作；全程不发键。"
+        notice = "所有已开启头势同时识别。先做指令动作，再观察日常动作；全程不执行动作。"
         router.setMode(.testing); overlayChanged?()
     }
     func setEverydayObservation(_ value: Bool) {
         guard jointTesting else { return }
         observingEveryday = value; everydayCount = 0; jointCounts.removeAll(); jointLastTrigger = nil
         router.setMode(.testing); clearTransientFeedback()
-        notice = value ? "自然看屏幕、说话和低头；这里出现的识别可作为误触线索，不会发键。" : "做需要使用的头势，检查是否被识别成其他动作；不会发键。"
+        notice = value ? "自然看屏幕、说话和低头；这里出现的识别可作为误触线索，不会执行动作。" : "做需要使用的头势，检查是否被识别成其他动作；不会执行动作。"
     }
     func stopTest() {
         testTarget = nil; testingAll = false; jointTesting = false; observingEveryday = false; practice = nil
@@ -276,6 +289,7 @@ struct FeedbackEvent: Identifiable, Equatable {
     func prepareToQuit() async { pause("正在退出"); keys.release() }
 
     private func receive(_ sample: MotionSample) {
+        guard !selectingApplication else { return }
         if walkingPaused {
             if !suspended {
                 suspended = true; router.setMode(.paused); gestureStatus = [:]
@@ -299,9 +313,10 @@ struct FeedbackEvent: Identifiable, Equatable {
         // shortcut can open voice input and reconfigure the Bluetooth audio device.
         playSound(for: route.gesture)
         if !enabled {
-            let message = "\(route.gesture.title)已达标，点击“启动头势控制”后才会执行快捷键"
+            let message = "\(route.gesture.title)已达标，点击“启动头势控制”后才会执行动作"
             notice = message
-            publishTrigger(Trigger(gesture:route.gesture,caps:[],outcome:.idlePreview,message:message))
+            publishTrigger(Trigger(gesture:route.gesture,caps:[],outcome:.idlePreview,message:message,
+                                   application: route.binding.action == .application ? route.binding.application : nil))
             record(message)
             return
         }
@@ -318,12 +333,33 @@ struct FeedbackEvent: Identifiable, Equatable {
         Task { await self.perform(route,targetPID:targetPID) }
     }
     private func perform(_ route: GestureRouter.Route, targetPID: pid_t?) async {
-        guard router.accepts(route), enabled else { return }
-        guard !operation else { skip(route, reason: "上一次按键尚未结束"); return }
+        guard router.accepts(route), enabled, !selectingApplication, !walkingPaused else { return }
+        guard !operation else { skip(route, reason: "上一次动作尚未结束"); return }
         if route.binding.action == .pause {
             publishTrigger(Trigger(gesture:route.gesture,caps:[],outcome:.paused,message:"暂停头势控制"))
             record("已通过\(route.gesture.title)暂停")
             pause("已通过\(route.gesture.title)暂停"); return
+        }
+        if route.binding.action == .application || route.binding.action == .previousApplication {
+            let target = route.binding.action == .application ? route.binding.application : applications.previousApplication(excluding: targetPID)
+            guard let target else {
+                skip(route, reason: route.binding.action == .application ? "请先选择目标应用" : ApplicationSwitchError.noPrevious.localizedDescription); return
+            }
+            operation = true; defer { operation = false }
+            do {
+                try await applications.switchTo(target, isAllowed: { [weak self] in
+                    guard let self else { return false }
+                    return self.router.accepts(route) && self.enabled && !self.selectingApplication && !self.walkingPaused
+                })
+                guard router.accepts(route), enabled, !selectingApplication, !walkingPaused else { return }
+                notice = "\(route.gesture.title) → 已切换至 \(target.name)"
+                publishTrigger(Trigger(gesture: route.gesture, caps: [], outcome: .switched, message: notice, application: target))
+                record(notice)
+            } catch {
+                guard router.accepts(route), enabled, !selectingApplication, !walkingPaused else { return }
+                skip(route, reason: error.localizedDescription)
+            }
+            overlayChanged?(); return
         }
         guard route.binding.action == .shortcut, let shortcut = route.binding.shortcut else { return }
         guard let targetPID else { skip(route, reason: "没有可接收按键的前台应用"); return }
@@ -343,7 +379,9 @@ struct FeedbackEvent: Identifiable, Equatable {
     }
     private func skip(_ route: GestureRouter.Route, reason: String) {
         notice = reason; record("\(route.gesture.title)：\(reason)")
-        publishTrigger(Trigger(gesture: route.gesture, caps: route.binding.shortcut?.caps ?? [], outcome: .skipped, message: reason))
+        publishTrigger(Trigger(gesture: route.gesture, caps: route.binding.action == .shortcut ? route.binding.shortcut?.caps ?? [] : [],
+                               outcome: .skipped, message: reason,
+                               application: route.binding.action == .application ? route.binding.application : nil))
         overlayChanged?()
     }
     private func publishStatus(_ sample: MotionSample) {
@@ -391,9 +429,11 @@ struct FeedbackEvent: Identifiable, Equatable {
     private func showPreview(_ route: GestureRouter.Route) {
         let binding = route.binding
         let caps = binding.action == .shortcut ? (binding.shortcut?.caps ?? []) : []
-        let action = binding.action == .shortcut ? (binding.shortcut?.label ?? "尚未录入") : binding.action.title
-        let message = "\(route.gesture.title) → \(action)（测试，未发送）"
-        publishTrigger(Trigger(gesture:route.gesture,caps:caps,outcome:.preview,message:message))
+        let action = binding.action == .application ? (binding.application?.name ?? "尚未选择应用") :
+            binding.action == .shortcut ? (binding.shortcut?.label ?? "尚未录入") : binding.action.title
+        let message = "\(route.gesture.title) → \(action)（测试，未执行）"
+        publishTrigger(Trigger(gesture:route.gesture,caps:caps,outcome:.preview,message:message,
+                               application: binding.action == .application ? binding.application : nil))
         record(message)
         if jointTesting {
             jointLastTrigger = lastTrigger

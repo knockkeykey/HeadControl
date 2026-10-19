@@ -23,10 +23,10 @@ public enum AlertSound {
 }
 
 public enum ActionKind: String, CaseIterable, Codable, Identifiable, Sendable {
-    case disabled, shortcut, pause
+    case disabled, shortcut, application, previousApplication, pause
     public var id: String { rawValue }
     public var title: String {
-        switch self { case .disabled: "不操作"; case .shortcut: "点按快捷键"; case .pause: "暂停头势控制" }
+        switch self { case .disabled: "不操作"; case .shortcut: "点按快捷键"; case .application: "切换到应用"; case .previousApplication: "切换到上一个应用"; case .pause: "暂停头势控制" }
     }
 }
 
@@ -42,10 +42,29 @@ public struct Shortcut: Codable, Equatable, Sendable {
     public static let modifierKeyCodes: Set<UInt16> = [54,55,56,60,58,61,59,62]
 }
 
+/// A saved application identity, independent of whether it is currently installed.
+public struct ApplicationTarget: Codable, Equatable, Identifiable, Sendable {
+    public var name: String
+    public var path: String
+    public var bundleIdentifier: String?
+    public var id: String { path }
+    public init(name: String, path: String, bundleIdentifier: String? = nil) {
+        self.name = name; self.path = path; self.bundleIdentifier = bundleIdentifier
+    }
+    public var isValid: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && name.count <= 512 &&
+        path.hasPrefix("/") && path.lowercased().hasSuffix(".app") && !path.contains("\0") &&
+        (bundleIdentifier.map { !$0.isEmpty && $0.count <= 512 && !$0.contains("\0") } ?? true)
+    }
+}
+
 public struct GestureBinding: Codable, Equatable, Sendable {
     public var action: ActionKind
     public var shortcut: Shortcut?
-    public init(_ action: ActionKind = .disabled, shortcut: Shortcut? = nil) { self.action = action; self.shortcut = shortcut }
+    public var application: ApplicationTarget?
+    public init(_ action: ActionKind = .disabled, shortcut: Shortcut? = nil, application: ApplicationTarget? = nil) {
+        self.action = action; self.shortcut = shortcut; self.application = application
+    }
 }
 
 public struct GestureTuning: Codable, Equatable, Sendable {
@@ -82,7 +101,7 @@ public struct GestureTuning: Codable, Equatable, Sendable {
 }
 
 public struct Configuration: Codable, Equatable, Sendable {
-    public var version = 5
+    public var version = 6
     public var sound = true
     public var overlay = true
     /// Suspend gestures while the headphones report walking or running.
@@ -111,9 +130,10 @@ public struct Configuration: Codable, Equatable, Sendable {
     public mutating func set(_ binding: GestureBinding, for gesture: Gesture) { bindings[gesture.rawValue] = binding }
     public var isValid: Bool {
         let keys = Set(Gesture.allCases.map(\.rawValue))
-        return version == 5 && Set(recognitionEnabled.keys) == keys && Set(bindings.keys) == keys && Set(tuning.keys) == keys && sounds.allSatisfy({ keys.contains($0.key) && AlertSound.isValid($0.value) }) && Gesture.allCases.allSatisfy {
+        return version == 6 && Set(recognitionEnabled.keys) == keys && Set(bindings.keys) == keys && Set(tuning.keys) == keys && sounds.allSatisfy({ keys.contains($0.key) && AlertSound.isValid($0.value) }) && Gesture.allCases.allSatisfy {
             let b = binding($0)
-            return tuning[$0.rawValue]?.isValid == true && (b.action != .shortcut || b.shortcut?.isValid == true)
+            return tuning[$0.rawValue]?.isValid == true && (b.action != .shortcut || b.shortcut?.isValid == true) &&
+                (b.action != .application || b.application?.isValid == true)
         }
     }
     private enum CodingKeys: String, CodingKey { case version, sound, sounds, overlay, pauseWhileWalking, recognitionEnabled, bindings, tuning }
@@ -121,7 +141,7 @@ public struct Configuration: Codable, Equatable, Sendable {
         self.init()
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let storedVersion = try c.decode(Int.self, forKey: .version)
-        guard (1...5).contains(storedVersion) else { throw ConfigError.invalid }
+        guard (1...6).contains(storedVersion) else { throw ConfigError.invalid }
         if storedVersion >= 5 { recognitionEnabled = try c.decode([String: Bool].self, forKey: .recognitionEnabled) }
         sound = try c.decode(Bool.self, forKey: .sound)
         overlay = try c.decode(Bool.self, forKey: .overlay)

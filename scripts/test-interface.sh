@@ -12,7 +12,9 @@ xcrun swiftc -D INTERFACE_PROBE -parse-as-library \
   "$task_root/Tests/Platform/InterfaceProbe.swift" \
   "$task_root/HeadControl/App/AppController.swift" \
   "$task_root/HeadControl/Platform/ConfigurationStore.swift" \
+  "$task_root/HeadControl/Platform/ApplicationSwitcher.swift" \
   "$task_root/HeadControl/Platform/Snapshot.swift" \
+  "$task_root/HeadControl/Platform/OverlayController.swift" \
   "$views_root"/*.swift \
   "$task_root"/Core/Sources/HeadControlCore/*.swift -o "$probe_root/interface"
 if [[ "${2:-}" == --interactive ]]; then
@@ -35,12 +37,14 @@ PLIST
   echo "Interface navigation fixture: $app_root (synthetic sensor, no key or audio IO)"
   exit 0
 fi
-for scenario in practice joint feedback calibration paused preview preview-normal preview-details preview-status calibration-reminder calibration-reminder-start calibration-reminder-later; do
+scenarios=(practice joint feedback calibration paused preview preview-normal preview-details preview-status calibration-reminder calibration-reminder-start calibration-reminder-later application-row application-picker-light application-picker-dark application-row-normal application-long application-feedback application-hud application-hud-failure)
+if [[ -n "${HEADCONTROL_TEST_SCENARIOS:-}" ]]; then scenarios=("${(@s: :)HEADCONTROL_TEST_SCENARIOS}"); fi
+for scenario in "${scenarios[@]}"; do
   page=gestures
-  if [[ "$scenario" == feedback || "$scenario" == preview-status ]]; then page=status; fi
+  if [[ "$scenario" == feedback || "$scenario" == preview-status || "$scenario" == application-feedback ]]; then page=status; fi
   snapshot="$probe_root/$scenario.png"
   "$probe_root/interface" "$scenario" "$snapshot" --page "$page"
   [[ -s "$snapshot" ]]
   cp "$snapshot" "$output_root/$scenario.png"
 done
-echo "PASS: twelve production-interface scenarios rendered to $output_root (synthetic motion, no key or audio IO)"
+echo "PASS: ${#scenarios[@]} production-interface scenarios rendered to $output_root (synthetic motion, no key, application activation or audio IO)"
