@@ -19,7 +19,9 @@ struct MenuBarPanel: View {
                     .toggleStyle(.switch).labelsHidden()
                     .disabled(!controller.readyToEnable && !controller.enabled)
             }
-            HeadOrbView(pose: motion.pose, link: motion.link, enabled: controller.enabled)
+            PoseReader(feed: motion.poseFeed) { [link = motion.link, enabled = controller.enabled] pose in
+                HeadOrbView(pose: pose, link: link, enabled: enabled)
+            }
                 .frame(height: 150).frame(maxWidth: .infinity)
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             LastTriggerView(trigger: controller.lastTrigger).frame(maxWidth: .infinity, alignment: .leading)

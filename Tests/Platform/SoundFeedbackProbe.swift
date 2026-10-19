@@ -7,6 +7,9 @@ import CoreMotion
     static var events: [String] = []
     static var failKey = false
 }
+@MainActor final class PoseFeed: ObservableObject {
+    @Published var pose = MotionSample(time: 0)
+}
 @MainActor final class MotionService: ObservableObject {
     var onSample: ((MotionSample) -> Void)?
     var onInvalidation: ((String) -> Void)?
@@ -16,7 +19,8 @@ import CoreMotion
     @Published var calibrated = true
     @Published var walking = false
     @Published var link: HeadphoneLink = .tracking
-    @Published var pose = MotionSample(time: 0)
+    let poseFeed = PoseFeed()
+    var pose: MotionSample { get { poseFeed.pose } set { poseFeed.pose = newValue } }
     @Published var sensor = "右耳"
     @Published var calibrating = false
     @Published var calibrationProgress = 0.0

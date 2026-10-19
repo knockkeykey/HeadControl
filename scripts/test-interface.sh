@@ -37,10 +37,11 @@ PLIST
   echo "Interface navigation fixture: $app_root (synthetic sensor, no key or audio IO)"
   exit 0
 fi
-scenarios=(practice joint feedback calibration paused preview preview-normal preview-details preview-status calibration-reminder calibration-reminder-start calibration-reminder-later application-row application-picker-light application-picker-dark application-row-normal application-long application-feedback application-hud application-hud-failure)
+scenarios=(practice joint feedback general calibration paused preview preview-normal preview-details preview-status calibration-reminder calibration-reminder-start calibration-reminder-later application-row application-picker-light application-picker-dark application-row-normal application-long application-feedback application-hud application-hud-failure)
 if [[ -n "${HEADCONTROL_TEST_SCENARIOS:-}" ]]; then scenarios=("${(@s: :)HEADCONTROL_TEST_SCENARIOS}"); fi
 for scenario in "${scenarios[@]}"; do
   page=gestures
+  if [[ "$scenario" == general ]]; then page=general; fi
   if [[ "$scenario" == feedback || "$scenario" == preview-status || "$scenario" == application-feedback ]]; then page=status; fi
   snapshot="$probe_root/$scenario.png"
   "$probe_root/interface" "$scenario" "$snapshot" --page "$page"

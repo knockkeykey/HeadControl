@@ -10,15 +10,13 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         switch self {
         case .status: "按清单完成准备，点击“启动头势控制”就能开始使用。"
         case .gestures: "开启需要的头势，再选择动作。小球背对着你，拖动圆弧上的圆点调整动作幅度。"
-        case .general: "悬浮条、提示音、走动暂停和程序坞图标。"
+        case .general: "外观、悬浮条、提示音、走动暂停和程序坞图标。"
         }
     }
 }
 
 struct SettingsRoot: View {
     @ObservedObject var controller: AppController
-    @AppStorage(AppTheme.preferenceKey) private var theme = "system"
-    @Environment(\.colorScheme) private var colorScheme
     @State private var page: SettingsPage? = SettingsRoot.initialPage
     @State private var hoveringContent = false
     @State private var columns: NavigationSplitViewVisibility = .all
@@ -61,12 +59,13 @@ struct SettingsRoot: View {
             }
             .overlay(alignment: .topTrailing) {
                 // Shares the title bar row with the traffic lights; the window has no toolbar.
-                HStack(spacing: 2) { themeButton; sidebarButton }
+                sidebarButton
                     .frame(height: SettingsWindow.titleBarHeight)
                     .padding(.trailing, 10)
                     .offset(y: -SettingsWindow.titleBarHeight)
             }
             .navigationSplitViewColumnWidth(min: 190, ideal: 205, max: 230)
+            .toolbar(removing: .sidebarToggle)
         } detail: {
             let current = page ?? .status
             ScrollView {
@@ -89,27 +88,18 @@ struct SettingsRoot: View {
             .overlay(alignment: .topLeading) {
                 // With the sidebar collapsed, keep the controls beside the traffic lights.
                 if columns == .detailOnly {
-                    HStack(spacing: 2) { sidebarButton; themeButton }
+                    sidebarButton
                         .frame(height: SettingsWindow.titleBarHeight)
                         .padding(.leading, 78)
                         .offset(y: -SettingsWindow.titleBarHeight)
                 }
             }
-            .toolbar(removing: .sidebarToggle)
         }
         .navigationSplitViewStyle(.balanced)
         .toolbar(.hidden, for: .windowToolbar)
-        .onChange(of: theme) { _, value in AppTheme.apply(value, animated: true) }
     }
 
-    private var themeAction: String { colorScheme == .dark ? "切换到浅色模式" : "切换到深色模式" }
     private var sidebarAction: String { columns == .detailOnly ? "显示侧边栏" : "隐藏侧边栏" }
-
-    private var themeButton: some View {
-        SidebarIconButton(symbol: colorScheme == .dark ? "sun.max" : "moon", label: themeAction) {
-            theme = colorScheme == .dark ? "light" : "dark"
-        }
-    }
 
     private var sidebarButton: some View {
         SidebarIconButton(symbol: "sidebar.left", label: sidebarAction) {
@@ -247,7 +237,9 @@ struct StatusPage: View {
                     VStack(alignment: .leading, spacing: 12) {
                         SectionTitle(title: "最近一次")
                         VStack(spacing: 12) {
-                            HeadOrbView(pose: motion.pose, link: motion.link, enabled: controller.enabled, showsBodyBackdrop: true)
+                            PoseReader(feed: motion.poseFeed) { [link = motion.link, enabled = controller.enabled] pose in
+                                HeadOrbView(pose: pose, link: link, enabled: enabled, showsBodyBackdrop: true)
+                            }
                                 .frame(height: 160)
                                 .accessibilityLabel("实时头部姿态，默认正后方视角")
                             Group {
@@ -429,10 +421,22 @@ struct LastTriggerView: View {
 struct GeneralPage: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: ConfigurationStore
+    @AppStorage(AppTheme.preferenceKey) private var theme = "system"
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Card {
                 VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Label { VStack(alignment: .leading) { Text("外观"); Text("跟随系统，或固定使用浅色、深色主题").font(.caption).foregroundStyle(.secondary) } } icon: { Image(systemName: "circle.lefthalf.filled") }
+                        Spacer()
+                        Picker("外观", selection: $theme) {
+                            Text("跟随系统").tag("system")
+                            Text("浅色").tag("light")
+                            Text("深色").tag("dark")
+                        }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    }
+                    Divider()
                     toggleRow("悬浮状态条", "开启时在屏幕顶部显示最近的头势和动作", "rectangle.topthird.inset.filled", $store.configuration.overlay)
                     Divider()
                     toggleRow("提示音", "每完成一个头势都会响一声，可在“头势”页为每个头势选择不同声音", "speaker.wave.2", $store.configuration.sound)
@@ -453,6 +457,7 @@ struct GeneralPage: View {
             }
             Text("启动、耳机断开、重新校准、屏幕休眠或会话离开后保持暂停。修改设置会清空未完成动作，控制保持当前状态；修改识别参数后需重新测试。").font(.caption).foregroundStyle(.secondary)
         }
+        .onChange(of: theme) { _, value in AppTheme.apply(value, animated: true) }
     }
     private func toggleRow(_ title: String, _ detail: String, _ icon: String, _ isOn: Binding<Bool>) -> some View {
         HStack {

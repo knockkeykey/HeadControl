@@ -17,7 +17,9 @@ struct GesturesPage: View {
             if !controller.enabled { startControlPrompt }
             HStack(alignment: .top, spacing: 16) {
                 Card(padding: 0, fillsHeight: true) {
-                    HeadOrbView(pose: motion.pose, ghost: ghost, link: motion.link, enabled: controller.enabled, showsBodyBackdrop: true)
+                    PoseReader(feed: motion.poseFeed) { [ghost, link = motion.link, enabled = controller.enabled] pose in
+                        HeadOrbView(pose: pose, ghost: ghost, link: link, enabled: enabled, showsBodyBackdrop: true)
+                    }
                         .frame(maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
                         .overlay(alignment: .topLeading) {
                             HStack(spacing: 6) {
@@ -259,10 +261,15 @@ struct GesturesPage: View {
                 .disabled(!enabled || !motion.calibrated || testing)
                 .help(!enabled ? "先开启这个头势再测试" : motion.calibrated ? "舒适地做三次这个头势，不执行动作" : "先在右上方完成校准")
             }
-            ArcGauge(value: enabled && motion.calibrated ? g.travel(motion.pose) : 0,
-                     threshold: angleBinding(g), neutral: t.neutral,
-                     peak: controller.testPeaks[g], suggestion: suggestion?.angle,
-                     lit: enabled && controller.hudTrigger?.gesture == g, ready: enabled && ready(g))
+            let live = enabled && motion.calibrated
+            let threshold = angleBinding(g), peak = controller.testPeaks[g]
+            let lit = enabled && controller.hudTrigger?.gesture == g, isReady = enabled && ready(g)
+            PoseReader(feed: motion.poseFeed) { pose in
+                ArcGauge(value: live ? g.travel(pose) : 0,
+                         threshold: threshold, neutral: t.neutral,
+                         peak: peak, suggestion: suggestion?.angle,
+                         lit: lit, ready: isReady)
+            }
                 .frame(height: 96)
                 .opacity(enabled ? 1 : 0.4)
             statusLine(g, t)

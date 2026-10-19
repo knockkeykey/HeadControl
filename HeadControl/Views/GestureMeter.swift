@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// Re-renders only its content when the live pose changes, leaving the enclosing page untouched.
+struct PoseReader<Content: View>: View {
+    @ObservedObject var feed: PoseFeed
+    @ViewBuilder var content: (MotionSample) -> Content
+    var body: some View { content(feed.pose) }
+}
+
 /// 240° gauge: live travel fills the arc, the knob is the draggable trigger angle,
 /// the grey wedge near zero is the return-to-neutral zone, a dashed tick is the suggestion.
 struct ArcGauge: View {

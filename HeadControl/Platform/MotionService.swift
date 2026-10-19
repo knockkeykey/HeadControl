@@ -2,6 +2,11 @@ import AppKit
 import Combine
 import CoreMotion
 
+/// Only leaf views that draw the live pose observe this.
+@MainActor final class PoseFeed: ObservableObject {
+    @Published var pose = MotionSample(time: 0)
+}
+
 @MainActor final class MotionService: NSObject, ObservableObject, CMHeadphoneMotionManagerDelegate {
     @Published private(set) var link: HeadphoneLink = .idle
     @Published private(set) var tracking = false
@@ -9,7 +14,9 @@ import CoreMotion
     @Published private(set) var calibrating = false
     @Published private(set) var calibrationProgress = 0.0
     @Published private(set) var calibrationHint = "正对屏幕，保持自然坐姿"
-    @Published private(set) var pose = MotionSample(time: 0)
+    /// Live pose at UI rate, kept out of objectWillChange so whole pages are not re-rendered 20×/s.
+    let poseFeed = PoseFeed()
+    var pose: MotionSample { poseFeed.pose }
     @Published private(set) var sensor = "未知"
     @Published private(set) var authorization = CMHeadphoneMotionManager.authorizationStatus()
     /// The headphones report walking or running; used to suspend gestures, never shown as data.
@@ -197,7 +204,7 @@ import CoreMotion
                 reference = motion.attitude.copy() as? CMAttitude
                 calibrated = reference != nil; calibrating = false; calibrationProgress = calibrated ? 1 : 0
                 calibrationHint = calibrated ? "校准完成，可开始三次动作练习" : "校准失败，请重试"
-                pose = MotionSample(time: motion.timestamp); refreshResources()
+                poseFeed.pose = MotionSample(time: motion.timestamp); refreshResources()
                 onCalibrationResult?(calibrationHint); return
             }
             let progress = (stablePose.progress * 20).rounded() / 20
@@ -207,7 +214,7 @@ import CoreMotion
             }
         }
         if lastUI == nil || sample.time < lastUI! || sample.time - lastUI! >= 0.05 {
-            pose = sample; lastUI = sample.time
+            poseFeed.pose = sample; lastUI = sample.time
         }
         if calibrated && (usage.active || usage.preview) { onSample?(sample) }
     }
