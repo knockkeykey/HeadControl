@@ -477,6 +477,20 @@ final class RoutingTests: XCTestCase {
         XCTAssertEqual(routes.count,1); XCTAssertFalse(routes[0].executes); XCTAssertFalse(router.accepts(routes[0]))
         XCTAssertFalse(router.preview(.nod,configuration:configuration)!.executes)
     }
+    func testPausedFeedbackNeverAuthorizesExecutionEvenAfterStarting() throws {
+        var routes: [GestureRouter.Route] = []
+        for step in 1...100 {
+            if let route = router.update(.init(time: Double(step) * 0.02, roll: step <= 15 ? 0 : -30),
+                                         configuration: configuration, feedbackWhenPaused: true) { routes.append(route) }
+        }
+        let route = try XCTUnwrap(routes.first)
+        XCTAssertEqual(routes.count, 1)
+        XCTAssertEqual(route.gesture, .tiltLeft)
+        XCTAssertFalse(route.executes)
+        XCTAssertFalse(router.accepts(route))
+        router.setMode(.active)
+        XCTAssertFalse(router.accepts(route))
+    }
     func testActiveUsesGlobalShortcutOnceAndRejectsOldWorkAfterPause() throws {
         router.setMode(.active); _=feed(0.3)
         let routes=feed(2,roll:-25); XCTAssertEqual(routes.count,1)

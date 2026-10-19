@@ -2,12 +2,13 @@ import AppKit
 import Combine
 
 enum TriggerOutcome: Equatable {
-    case sent, skipped, preview, unbound, paused
+    case sent, skipped, preview, idlePreview, unbound, paused
     var title: String {
         switch self {
         case .sent: "已识别，已发键"
         case .skipped: "已识别，跳过执行"
         case .preview: "测试识别，未发键"
+        case .idlePreview: "已达标，未启动控制"
         case .unbound: "已识别，未设置动作"
         case .paused: "已暂停头势控制"
         }
@@ -34,6 +35,7 @@ struct FeedbackEvent: Identifiable, Equatable {
     let keys = KeySender()
     @Published private(set) var enabled = false
     @Published private(set) var testing = false
+    @Published var showCalibrationReminder = false
     @Published private(set) var notice = "先连接耳机并校准，再开启头势控制"
     @Published private(set) var lastTrigger: Trigger?
     @Published private(set) var events: [FeedbackEvent] = []
@@ -71,6 +73,7 @@ struct FeedbackEvent: Identifiable, Equatable {
     private var previewSurfaces: Set<String> = []
     private var operation = false
     private var suspended = false
+    private var calibrationReminderHandled = false
     private var timer: Timer?
     private let feedback = SoundFeedback()
     private var cancellables: Set<AnyCancellable> = []
@@ -132,6 +135,11 @@ struct FeedbackEvent: Identifiable, Equatable {
         }
         // Forward nested changes so views observing only the controller stay current.
         motion.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &cancellables)
+        // Wait for the complete motion update, avoiding transient states while recentering.
+        Publishers.CombineLatest3(motion.$tracking, motion.$calibrated, motion.$calibrating)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateCalibrationReminder() }
+            .store(in: &cancellables)
         timer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -159,11 +167,20 @@ struct FeedbackEvent: Identifiable, Equatable {
         if let url = URL(string:"x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
     }
     func setPreviewVisible(_ visible: Bool, surface: String) {
+        let wasPreviewing = previewingGestures
         if visible { previewSurfaces.insert(surface) } else { previewSurfaces.remove(surface) }
+        if wasPreviewing != previewingGestures, !enabled, !testing {
+            router.setMode(.paused); gestureStatus = [:]; clearTransientFeedback()
+        }
         syncMotionUsage()
     }
+    private var previewingGestures: Bool {
+        previewSurfaces.contains("settings") && !previewSurfaces.isDisjoint(with: ["status", "gestures"])
+    }
     private func syncMotionUsage() {
-        motion.setUsage(active: enabled || testing, preview: !previewSurfaces.isEmpty, pauseWhileWalking: store.configuration.pauseWhileWalking)
+        // Page markers only enable feedback inside the visible settings window.
+        let visibleSurfaces = previewSurfaces.subtracting(["status", "gestures"])
+        motion.setUsage(active: enabled || testing, preview: !visibleSurfaces.isEmpty, pauseWhileWalking: store.configuration.pauseWhileWalking)
     }
     func setEnabled(_ value: Bool) {
         guard value else { pause("头势控制已暂停"); return }
@@ -182,7 +199,22 @@ struct FeedbackEvent: Identifiable, Equatable {
         notice = value ? "练习中，请舒适地完成三次动作，不会发送快捷键" : "测试已结束，头势控制保持暂停"
         overlayChanged?()
     }
-    func calibrate() { motion.recenter() }
+    private func updateCalibrationReminder() {
+        if !motion.tracking || motion.calibrated {
+            calibrationReminderHandled = false
+            showCalibrationReminder = false
+        } else if motion.calibrating {
+            calibrationReminderHandled = true
+            showCalibrationReminder = false
+        } else if !calibrationReminderHandled {
+            calibrationReminderHandled = true
+            showCalibrationReminder = true
+        }
+    }
+    func calibrate() {
+        showCalibrationReminder = false
+        motion.recenter()
+    }
 
     // MARK: Calibration test
     func startTest(_ gesture: Gesture, all: Bool = false) {
@@ -254,7 +286,8 @@ struct FeedbackEvent: Identifiable, Equatable {
         if suspended {
             suspended = false; router.setMode(testing ? .testing : enabled ? .active : .paused); overlayChanged?()
         }
-        let route = router.update(sample,configuration:store.configuration,testingGesture:testTarget)
+        let route = router.update(sample,configuration:store.configuration,testingGesture:testTarget,
+                                  feedbackWhenPaused: previewingGestures && motion.tracking && motion.calibrated)
         publishStatus(sample)
         if testing {
             if let route { playSound(for: route.gesture); showPreview(route) }
@@ -265,6 +298,13 @@ struct FeedbackEvent: Identifiable, Equatable {
         // This acknowledges recognition, independent of key delivery. Start before a
         // shortcut can open voice input and reconfigure the Bluetooth audio device.
         playSound(for: route.gesture)
+        if !enabled {
+            let message = "\(route.gesture.title)已达标，点击“启动头势控制”后才会执行快捷键"
+            notice = message
+            publishTrigger(Trigger(gesture:route.gesture,caps:[],outcome:.idlePreview,message:message))
+            record(message)
+            return
+        }
         guard route.executes else {
             if enabled {
                 notice = "\(route.gesture.title) 已识别，但未设置动作"

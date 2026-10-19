@@ -8,6 +8,7 @@ struct HeadOrbView: NSViewRepresentable {
     var ghost: MotionSample? = nil
     var link: HeadphoneLink
     var enabled = false
+    var showsBodyBackdrop = false
     @Environment(\.colorScheme) private var colorScheme
 
     func makeCoordinator() -> HeadOrbScene { HeadOrbScene() }
@@ -31,11 +32,12 @@ struct HeadOrbView: NSViewRepresentable {
         let live = link.tone == .connected ? pose : MotionSample(time: pose.time, yaw: 0, pitch: 0, roll: 0)
         context.coordinator.apply(pitch: live.pitch, yaw: live.yaw, roll: live.roll,
                                   ghost: ghost.map { ($0.pitch, $0.yaw, $0.roll) },
-                                  status: status, dark: colorScheme == .dark)
+                                  status: status, dark: colorScheme == .dark,
+                                  showsBodyBackdrop: showsBodyBackdrop)
     }
 }
 
-/// Ceramic orb wearing two AirPods, seen from behind and slightly above so it turns the same way the wearer does.
+/// Ceramic orb wearing two AirPods, seen straight from behind so neutral looks fully centred.
 /// An equator and a forehead-to-nape meridian make turn, nod and tilt all readable.
 final class HeadOrbScene {
     enum Status: Equatable { case off, warning, tracking, paused }
@@ -44,6 +46,10 @@ final class HeadOrbScene {
     let camera = SCNNode()
     private let pivot = SCNNode()
     private let ghostPivot = SCNNode()
+    private let bodyBackdrop = SCNNode()
+    private let bodyMaterial = SCNMaterial()
+    private let gridBackdrop = SCNNode()
+    private let gridMaterial = SCNMaterial()
     private let orb = SCNMaterial()
     private let lines = SCNMaterial()
     private let pod = SCNMaterial()
@@ -75,10 +81,37 @@ final class HeadOrbScene {
         ghostPivot.isHidden = true
         scene.rootNode.addChildNode(ghostPivot)
 
+        // A flat, stationary back silhouette: it must never inherit the head's pose.
+        // Compensate for its depth so its projected shoulders span 1.6 head diameters.
+        let backdropDepth: CGFloat = 1.2
+        let projectionScale = (7.58 + backdropDepth) / 7.58
+        let bodyPlane = SCNPlane(width: 3.8 * projectionScale, height: 1.6 * projectionScale)
+        bodyMaterial.lightingModel = .constant
+        bodyMaterial.writesToDepthBuffer = false
+        bodyPlane.firstMaterial = bodyMaterial
+        bodyBackdrop.geometry = bodyPlane
+        bodyBackdrop.position = SCNVector3(0, -1.2 * projectionScale, -backdropDepth)
+        bodyBackdrop.isHidden = true
+        scene.rootNode.addChildNode(bodyBackdrop)
+
+        // A rear wall and receding floor, drawn behind both the head and the stationary body.
+        let gridDepth: CGFloat = 3
+        let gridScale = (7.58 + gridDepth) / 7.58
+        let gridPlane = SCNPlane(width: 12.8 * gridScale, height: 4.4 * gridScale)
+        gridMaterial.lightingModel = .constant
+        gridMaterial.writesToDepthBuffer = false
+        gridMaterial.diffuse.mipFilter = .linear
+        gridPlane.firstMaterial = gridMaterial
+        gridBackdrop.geometry = gridPlane
+        gridBackdrop.position = SCNVector3(0, 0, -gridDepth)
+        gridBackdrop.renderingOrder = -2
+        gridBackdrop.isHidden = true
+        scene.rootNode.addChildNode(gridBackdrop)
+
         camera.camera = SCNCamera(); camera.camera?.fieldOfView = 30
         camera.camera?.wantsHDR = false
-        // Behind, about 20° above and slightly to the right.
-        camera.position = SCNVector3(1.3, 2.6, 7.0); camera.look(at: SCNVector3(0, -0.05, 0))
+        // Keep the camera level and centred: a zero pose must not look partly turned or tilted.
+        camera.position = SCNVector3(0, 0, 7.58); camera.look(at: SCNVector3Zero)
         scene.rootNode.addChildNode(camera)
 
         @discardableResult func light(_ type: SCNLight.LightType, _ intensity: CGFloat, euler: SCNVector3 = SCNVector3Zero) -> SCNNode {
@@ -91,8 +124,10 @@ final class HeadOrbScene {
         light(.ambient, 380)
     }
 
-    func apply(pitch: Double, yaw: Double, roll: Double, ghost: (Double, Double, Double)?, status: Status, dark: Bool, animated: Bool = true) {
+    func apply(pitch: Double, yaw: Double, roll: Double, ghost: (Double, Double, Double)?, status: Status, dark: Bool, showsBodyBackdrop: Bool = false, animated: Bool = true) {
         if self.dark != dark { self.dark = dark; paint(dark: dark) }
+        bodyBackdrop.isHidden = !showsBodyBackdrop
+        gridBackdrop.isHidden = !showsBodyBackdrop
         SCNTransaction.begin(); SCNTransaction.animationDuration = animated ? 0.07 : 0
         SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .linear)
         pivot.eulerAngles = Self.euler(pitch, yaw, roll)
@@ -114,6 +149,93 @@ final class HeadOrbScene {
         key.light?.intensity = dark ? 1050 : 820
         lines.diffuse.contents = dark ? NSColor(white: 0.62, alpha: 1) : NSColor(white: 0.55, alpha: 1)
         pod.diffuse.contents = NSColor(white: dark ? 0.94 : 0.995, alpha: 1)
+        bodyMaterial.diffuse.contents = Self.bodyTexture(dark: dark)
+        gridMaterial.diffuse.contents = Self.gridTexture(dark: dark)
+    }
+
+    /// Coordinates use the head's projected radius (1), with the neck tucked behind its lower edge.
+    /// The texture supplies both the outline and a soft alpha fade, independent of scene lighting.
+    private static func bodyTexture(dark: Bool) -> NSImage {
+        NSImage(size: NSSize(width: 1140, height: 480), flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+                NSPoint(x: (x + 1.9) * 300, y: (y + 2) * 300)
+            }
+            let silhouette = Self.bodyOutline(point: point)
+
+            context.saveGState()
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            NSColor(white: dark ? 0.82 : 0.38, alpha: dark ? 0.055 : 0.23).setFill()
+            silhouette.fill()
+            NSColor(white: dark ? 0.75 : 0.40, alpha: dark ? 0.30 : 0.68).setStroke()
+            silhouette.lineWidth = dark ? 3.6 : 5.4
+            silhouette.lineJoinStyle = .round
+            silhouette.stroke()
+            context.setBlendMode(.destinationIn)
+            NSGradient(colorsAndLocations: (.clear, 0), (.white, 0.38), (.white, 1))?
+                .draw(from: NSPoint(x: rect.midX, y: rect.minY), to: NSPoint(x: rect.midX, y: rect.maxY), options: [])
+            context.endTransparencyLayer()
+            context.restoreGState()
+            return true
+        }
+    }
+
+    private static func bodyOutline(point: (CGFloat, CGFloat) -> NSPoint) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.move(to: point(-0.32, -0.65))
+        path.curve(to: point(-0.40, -1.10), controlPoint1: point(-0.31, -0.88), controlPoint2: point(-0.29, -1.02))
+        path.curve(to: point(-1.38, -1.40), controlPoint1: point(-0.60, -1.25), controlPoint2: point(-1.10, -1.25))
+        path.curve(to: point(-1.60, -1.72), controlPoint1: point(-1.55, -1.49), controlPoint2: point(-1.60, -1.59))
+        path.line(to: point(-1.60, -2.2))
+        path.line(to: point(1.60, -2.2))
+        path.line(to: point(1.60, -1.72))
+        path.curve(to: point(1.38, -1.40), controlPoint1: point(1.60, -1.59), controlPoint2: point(1.55, -1.49))
+        path.curve(to: point(0.40, -1.10), controlPoint1: point(1.10, -1.25), controlPoint2: point(0.60, -1.25))
+        path.curve(to: point(0.32, -0.65), controlPoint1: point(0.29, -1.02), controlPoint2: point(0.31, -0.88))
+        path.close()
+        return path
+    }
+
+    private static func gridTexture(dark: Bool) -> NSImage {
+        NSImage(size: NSSize(width: 2304, height: 792), flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+                NSPoint(x: (x + 6.4) * 180, y: (y + 2.2) * 180)
+            }
+            let grid = NSBezierPath()
+            let horizon: CGFloat = 0.65, seam: CGFloat = -0.65, bottom: CGFloat = -2.2
+            for column in -18...18 {
+                let x = CGFloat(column) * 0.48
+                // Wall columns continue onto the floor toward a shared vanishing point.
+                grid.move(to: point(x, 2.2))
+                grid.line(to: point(x, seam))
+                grid.line(to: point(x * (bottom - horizon) / (seam - horizon), bottom))
+            }
+            for row in 0...7 {
+                let y = seam + CGFloat(row) * 0.40
+                grid.move(to: point(-6.4, y)); grid.line(to: point(6.4, y))
+            }
+            for row in 1...5 {
+                let y = horizon + (seam - horizon) * pow(1.20, CGFloat(row))
+                grid.move(to: point(-6.4, y)); grid.line(to: point(6.4, y))
+            }
+            context.saveGState()
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            NSColor(white: dark ? 0.72 : 0.40, alpha: dark ? 0.16 : 0.40).setStroke()
+            grid.lineWidth = dark ? 1.8 : 2.7
+            grid.stroke()
+            // Keep the grid outside the body, even where its fill fades to the card background.
+            context.setBlendMode(.destinationOut)
+            NSColor.white.setFill()
+            Self.bodyOutline(point: point).fill()
+            context.setBlendMode(.destinationIn)
+            NSGradient(colorsAndLocations: (.white, 0), (.white, 0.42), (.clear, 1))?
+                .draw(fromCenter: point(0, -0.10), radius: 0, toCenter: point(0, -0.10),
+                      radius: 6.2 * 180, options: [.drawsAfterEndingLocation])
+            context.endTransparencyLayer()
+            context.restoreGState()
+            return true
+        }
     }
 
     private func show(_ status: Status) {

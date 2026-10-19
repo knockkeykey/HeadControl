@@ -35,12 +35,12 @@ PLIST
   echo "Interface navigation fixture: $app_root (synthetic sensor, no key or audio IO)"
   exit 0
 fi
-for scenario in practice joint feedback calibration; do
+for scenario in practice joint feedback calibration paused preview preview-normal preview-details preview-status calibration-reminder calibration-reminder-start calibration-reminder-later; do
   page=gestures
-  if [[ "$scenario" == feedback ]]; then page=status; fi
+  if [[ "$scenario" == feedback || "$scenario" == preview-status ]]; then page=status; fi
   snapshot="$probe_root/$scenario.png"
   "$probe_root/interface" "$scenario" "$snapshot" --page "$page"
   [[ -s "$snapshot" ]]
   cp "$snapshot" "$output_root/$scenario.png"
 done
-echo "PASS: four production-interface scenarios rendered to $output_root (synthetic motion, no key or audio IO)"
+echo "PASS: twelve production-interface scenarios rendered to $output_root (synthetic motion, no key or audio IO)"

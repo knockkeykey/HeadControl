@@ -1,6 +1,18 @@
 import SwiftUI
 import AppKit
 
+@MainActor enum AppTheme {
+    static let preferenceKey = "appearanceTheme"
+
+    static func apply(_ value: String) {
+        switch value {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+    }
+}
+
 extension HeadphoneLink.Tone {
     var color: Color {
         switch self { case .off: .secondary; case .warning: .orange; case .connected: .green }
@@ -10,12 +22,13 @@ extension HeadphoneLink.Tone {
 /// Rounded surface used for every content block; quieter than a grouped Form, still native.
 struct Card<Content: View>: View {
     var padding: CGFloat = 18
+    var fillsHeight = false
     @ViewBuilder var content: Content
     var body: some View {
         // Wrap so multi-child content becomes one card, not one card per child.
         VStack(alignment: .leading, spacing: 0) { content }
             .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: fillsHeight ? .infinity : nil, alignment: .topLeading)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.06)))
     }

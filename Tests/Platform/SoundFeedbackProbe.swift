@@ -64,6 +64,41 @@ import CoreMotion
         var passed = 0
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("headcontrol-feedback-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
+        let calibration = AppController(store: ConfigurationStore(directory: directory.appendingPathComponent("calibration-reminder")))
+        calibration.motion.tracking = false; calibration.motion.calibrated = false
+        try await Task.sleep(for: .milliseconds(30))
+        guard !calibration.showCalibrationReminder else { throw failure("reminded before receiving headphone data") }
+        calibration.motion.tracking = true
+        try await Task.sleep(for: .milliseconds(30))
+        guard calibration.showCalibrationReminder else { throw failure("missing uncalibrated connection reminder") }
+        calibration.showCalibrationReminder = false
+        calibration.motion.calibrated = false
+        try await Task.sleep(for: .milliseconds(30))
+        guard !calibration.showCalibrationReminder else { throw failure("later action repeatedly showed reminder") }
+        calibration.motion.tracking = false
+        try await Task.sleep(for: .milliseconds(30))
+        calibration.motion.tracking = true
+        try await Task.sleep(for: .milliseconds(30))
+        guard calibration.showCalibrationReminder else { throw failure("reconnect did not renew reminder") }
+        calibration.calibrate()
+        try await Task.sleep(for: .milliseconds(30))
+        guard calibration.motion.calibrating, !calibration.showCalibrationReminder, !calibration.enabled else {
+            throw failure("calibrate action did not start calibration while keeping control paused")
+        }
+        calibration.motion.cancelCalibration()
+        try await Task.sleep(for: .milliseconds(30))
+        guard !calibration.showCalibrationReminder else { throw failure("cancelled calibration repeated reminder") }
+        calibration.motion.calibrated = true
+        try await Task.sleep(for: .milliseconds(30))
+        guard !calibration.showCalibrationReminder else { throw failure("calibrated headphones showed reminder") }
+        calibration.motion.calibrated = false
+        try await Task.sleep(for: .milliseconds(30))
+        guard calibration.showCalibrationReminder else { throw failure("invalidated calibration did not renew reminder") }
+        calibration.motion.tracking = false
+        try await Task.sleep(for: .milliseconds(30))
+        guard !calibration.showCalibrationReminder else { throw failure("disconnect kept stale reminder") }
+        calibration.shutdown()
+        print("PASS: calibration reminder, later dismissal, reconnect, direct calibration, cancellation, invalidation and disconnect")
         for scenario in 0..<9 {
             let store = ConfigurationStore(directory: directory.appendingPathComponent("\(scenario)"))
             store.configuration.sounds[Gesture.tiltLeft.rawValue] = "Submarine"
@@ -97,6 +132,58 @@ import CoreMotion
             controller.shutdown(); passed += 1
         }
         print("PASS: \(passed) controller feedback cases; sound precedes keys; disabled recognition produces neither sound nor key")
+
+        // Page previews acknowledge completed gestures without entering testing or control mode.
+        for surface in ["status", "gestures"] {
+        for scenario in 0..<8 {
+            let store = ConfigurationStore(directory: directory.appendingPathComponent("preview-\(surface)-\(scenario)"))
+            store.configuration.sounds[Gesture.tiltLeft.rawValue] = "Submarine"
+            if scenario == 3 { store.configuration.sound = false }
+            if scenario == 4 { store.configuration.recognitionEnabled[Gesture.tiltLeft.rawValue] = false }
+            if scenario == 7 { store.configuration.bindings[Gesture.tiltLeft.rawValue] = .init(.pause) }
+            let preview = AppController(store: store)
+            preview.setPreviewVisible(true, surface: "settings")
+            if scenario != 1 { preview.setPreviewVisible(true, surface: surface) }
+            if scenario == 2 { preview.setPreviewVisible(false, surface: "settings") }
+            if scenario == 2, preview.motion.usage.needsPose { throw failure("hidden gestures page kept pose demand") }
+            if scenario == 5 { preview.motion.calibrated = false }
+            if scenario == 6 { preview.setEnabled(true); preview.setEnabled(false) }
+            Trace.events = []
+            var time = 0.0
+            func feedPreview(_ seconds: Double, roll: Double = 0) {
+                for _ in 0..<Int(seconds / 0.02) {
+                    time += 0.02
+                    preview.motion.onSample?(.init(time: time, roll: roll))
+                }
+            }
+            feedPreview(0.3); feedPreview(2, roll: -30)
+            let recognizes = [0, 3, 6, 7].contains(scenario)
+            let sounds = recognizes && scenario != 3
+            guard Trace.events == (sounds ? ["sound:Submarine"] : []),
+                  !preview.enabled, !preview.testing,
+                  (preview.hudTrigger?.outcome == .idlePreview) == recognizes else {
+                throw failure("paused \(surface) page feedback failed in scenario \(scenario): \(Trace.events)")
+            }
+            if recognizes {
+                guard preview.lastTrigger?.gesture == .tiltLeft, preview.lastTrigger?.outcome == .idlePreview,
+                      preview.events.first?.message.contains(Gesture.tiltLeft.title) == true else {
+                    throw failure("\(surface) preview did not update latest trigger and event history")
+                }
+                preview.refreshFeedback(now: Date().addingTimeInterval(5))
+                guard preview.hudTrigger == nil else { throw failure("page success never expired") }
+                feedPreview(0.3); feedPreview(0.6, roll: -30)
+                guard Trace.events.count == (sounds ? 2 : 0), preview.hudTrigger?.outcome == .idlePreview else {
+                    throw failure("paused feedback failed to rearm after release and cooldown")
+                }
+                preview.setPreviewVisible(false, surface: surface)
+                guard preview.hudTrigger == nil else { throw failure("leaving page kept success feedback") }
+                feedPreview(1.1); feedPreview(0.6, roll: -30)
+                guard Trace.events.count == (sounds ? 2 : 0) else { throw failure("hidden page kept playing gesture sounds") }
+            }
+            preview.shutdown()
+        }
+        }
+        print("PASS: sixteen paused status/gestures-page scenarios; latest trigger, history, sound, cooldown, release, mute, disabled gesture, calibration, hidden page and pause binding; no keys")
 
         let store = ConfigurationStore(directory: directory.appendingPathComponent("test-flow"))
         let controller = AppController(store: store)

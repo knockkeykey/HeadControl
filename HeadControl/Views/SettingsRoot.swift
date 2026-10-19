@@ -17,7 +17,10 @@ enum SettingsPage: String, CaseIterable, Identifiable {
 
 struct SettingsRoot: View {
     @ObservedObject var controller: AppController
+    @AppStorage(AppTheme.preferenceKey) private var theme = "system"
+    @Environment(\.colorScheme) private var colorScheme
     @State private var page: SettingsPage? = SettingsRoot.initialPage
+    @State private var hoveringContent = false
     static var initialPage: SettingsPage {
         if let i = CommandLine.arguments.firstIndex(of: "--page"), CommandLine.arguments.indices.contains(i + 1),
            let p = SettingsPage(rawValue: CommandLine.arguments[i + 1]) { return p }
@@ -25,6 +28,13 @@ struct SettingsRoot: View {
     }
     var body: some View {
         split.frame(minWidth: 900, minHeight: 660)
+            .alert("请先校准正前方", isPresented: $controller.showCalibrationReminder) {
+                Button("校准") { controller.calibrate() }
+                    .keyboardShortcut(.defaultAction)
+                Button("稍后", role: .cancel) {}
+            } message: {
+                Text("正对屏幕，点击“校准”后保持静止一秒，即可自动完成校准。")
+            }
     }
     private var split: some View {
         NavigationSplitView {
@@ -58,15 +68,78 @@ struct SettingsRoot: View {
                     }
                     switch current {
                     case .status: StatusPage(controller: controller) { page = $0 }
-                    case .gestures: GesturesPage(controller: controller, store: controller.store)
+                    case .gestures: GesturesPage(controller: controller, store: controller.store, showStatus: { page = .status })
                     case .general: GeneralPage(controller: controller, store: controller.store)
                     }
                 }
                 .padding(28).frame(maxWidth: 980, alignment: .leading).frame(maxWidth: .infinity)
+                .background(OverlayScrollbars(hovering: hoveringContent))
             }
+            .onHover { hoveringContent = $0 }
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Spacer()
+                Button {
+                    theme = colorScheme == .dark ? "light" : "dark"
+                } label: {
+                    Label(themeAction, systemImage: colorScheme == .dark ? "sun.max" : "moon")
+                }
+                .labelStyle(.iconOnly)
+                .help(themeAction)
+                .accessibilityLabel(themeAction)
+            }
+        }
+        .onChange(of: theme) { _, value in AppTheme.apply(value) }
+    }
+
+    private var themeAction: String { colorScheme == .dark ? "切换到浅色模式" : "切换到深色模式" }
+}
+
+/// Configure only the enclosing detail scroll view, without changing system-wide preferences.
+private struct OverlayScrollbars: NSViewRepresentable {
+    let hovering: Bool
+
+    func makeNSView(context: Context) -> ScrollbarAnchor { ScrollbarAnchor() }
+    func updateNSView(_ view: ScrollbarAnchor, context: Context) { view.setHovering(hovering) }
+
+    final class ScrollbarAnchor: NSView {
+        private var hovering = false
+        private weak var scrollView: NSScrollView?
+        private var styleObservation: NSKeyValueObservation?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            // SwiftUI finishes attaching the document hierarchy after creating the anchor.
+            DispatchQueue.main.async { [weak self] in self?.configure() }
+        }
+
+        func setHovering(_ value: Bool) {
+            let entered = value && !hovering
+            hovering = value
+            configure()
+            if entered { scrollView?.flashScrollers() }
+        }
+
+        private func configure() {
+            guard let scrollView = enclosingScrollView else { return }
+            if self.scrollView !== scrollView {
+                self.scrollView = scrollView
+                // SwiftUI reapplies the system preference after attaching its scroll view.
+                // Keep this one view in overlay mode even when the system uses legacy bars.
+                styleObservation = scrollView.observe(\.scrollerStyle, options: [.new]) { view, _ in
+                    if view.scrollerStyle != .overlay { view.scrollerStyle = .overlay }
+                }
+            }
+            // Overlay scrollers never reserve a track beside the content. AppKit handles
+            // the knob's fading, edge hover, dragging and light/dark appearance.
+            if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
+            scrollView.autohidesScrollers = true
+        }
     }
 }
 
@@ -116,26 +189,47 @@ struct StatusPage: View {
             }
             HStack(alignment: .top, spacing: 16) {
                 ReadinessChecklist(controller: controller, go: go)
-                Card {
+                Card(fillsHeight: true) {
                     VStack(alignment: .leading, spacing: 12) {
                         SectionTitle(title: "最近一次")
-                        LastTriggerView(trigger: controller.lastTrigger)
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        Divider()
-                        if controller.events.isEmpty { Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary) }
-                        ForEach(Array(controller.events.prefix(6).enumerated()), id: \.offset) { _, e in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(e.time, format: .dateTime.hour().minute().second()).monospacedDigit().foregroundStyle(.tertiary)
-                                Text(e.message + (e.count > 1 ? " ×\(e.count)" : "")).textSelection(.enabled)
-                            }.font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                        VStack(spacing: 12) {
+                            HeadOrbView(pose: motion.pose, link: motion.link, enabled: controller.enabled, showsBodyBackdrop: true)
+                                .frame(height: 160)
+                                .accessibilityLabel("实时头部姿态，默认正后方视角")
+                            Group {
+                                if controller.lastTrigger == nil {
+                                    Text("做个头势试试").font(.headline).foregroundStyle(.secondary)
+                                } else {
+                                    LastTriggerView(trigger: controller.lastTrigger)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 228, maxHeight: .infinity)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Divider()
+                            if controller.events.isEmpty {
+                                Text("还没有触发记录").font(.caption).foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            ForEach(Array(controller.events.prefix(6).enumerated()), id: \.offset) { _, e in
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text(e.time, format: .dateTime.hour().minute().second()).monospacedDigit().foregroundStyle(.tertiary)
+                                    Text(e.message + (e.count > 1 ? " ×\(e.count)" : "")).textSelection(.enabled)
+                                }.font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
+                    .frame(maxHeight: .infinity)
                 }
                 .flash(on: controller.lastTrigger?.id, when: true)
                 .frame(width: 290)
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
+        .onAppear { controller.setPreviewVisible(true, surface: "status") }
+        .onDisappear { controller.setPreviewVisible(false, surface: "status") }
     }
 }
 
@@ -169,7 +263,7 @@ struct ReadinessChecklist: View {
     private var done: Int { [motion.authorized, controller.controlTrusted, motion.tracking, motion.calibrated, bound > 0].filter { $0 }.count }
 
     var body: some View {
-        Card {
+        Card(fillsHeight: true) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
                     SectionTitle(title: "准备清单")

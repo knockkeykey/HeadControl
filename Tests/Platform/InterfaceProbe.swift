@@ -24,8 +24,10 @@ import SwiftUI
                 controller.motion.pose = sample; controller.motion.onSample?(sample)
             }
         }
-        NSApp.appearance = NSAppearance(named: scenario == "joint" ? .aqua : .darkAqua)
+        NSApp.appearance = NSAppearance(named: ["joint", "preview-normal"].contains(scenario) ? .aqua : .darkAqua)
         switch scenario {
+        case "calibration-reminder", "calibration-reminder-start", "calibration-reminder-later":
+            controller.motion.calibrated = false
         case "practice":
             controller.startTest(.tiltLeft)
             for _ in 0..<2 { feed(1.1); feed(0.5, roll: -30); feed(0.2) }
@@ -39,15 +41,59 @@ import SwiftUI
             controller.calibrate(); controller.motion.calibrationProgress = 0.55
         default: break
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 660), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let size = scenario == "preview-normal" ? NSSize(width: 1240, height: 860) : NSSize(width: 900, height: 660)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "头势控制 · 界面检查"
         window.contentViewController = NSHostingController(rootView: SettingsRoot(controller: controller))
+        window.setContentSize(size)
         window.center(); window.makeKeyAndOrderFront(nil); self.window = window
         NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
         if scenario == "navigation" { return }
         Task { @MainActor in
+            if scenario.hasPrefix("preview") {
+                try? await Task.sleep(for: .milliseconds(100))
+                feed(0.3); feed(0.5, roll: -30)
+                if scenario == "preview-status" {
+                    guard controller.lastTrigger?.gesture == .tiltLeft,
+                          controller.lastTrigger?.outcome == .idlePreview,
+                          !controller.events.isEmpty, !controller.enabled, !Trace.events.contains("key") else {
+                        fatalError("Status page did not recognize synthetic motion while paused")
+                    }
+                }
+                if scenario == "preview-details", let content = window.contentView {
+                    func scrollViews(_ view: NSView) -> [NSScrollView] {
+                        (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+                    }
+                    if let scroll = scrollViews(content).max(by: { $0.bounds.width < $1.bounds.width }) {
+                        scroll.documentView?.scroll(NSPoint(x: 0, y: 430))
+                    }
+                }
+            }
             try? await Task.sleep(for: .milliseconds(900))
-            Snapshot.capture(window, to: URL(fileURLWithPath: output))
+            if scenario.hasPrefix("calibration-reminder") {
+                guard controller.showCalibrationReminder, let sheet = window.attachedSheet, let content = sheet.contentView else {
+                    fatalError("Missing native calibration reminder")
+                }
+                if scenario != "calibration-reminder" {
+                    @MainActor func buttons(_ view: NSView) -> [NSButton] {
+                        if let button = view as? NSButton { return [button] }
+                        return view.subviews.flatMap(buttons)
+                    }
+                    let action = scenario == "calibration-reminder-start" ? "校准" : "稍后"
+                    guard let button = buttons(content).first(where: { $0.title == action }) else {
+                        fatalError("Missing calibration reminder action: \(action)")
+                    }
+                    button.performClick(nil)
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard !controller.showCalibrationReminder, !controller.enabled,
+                          controller.motion.calibrating == (action == "校准") else {
+                        fatalError("Calibration reminder action did not reach the expected state")
+                    }
+                }
+            }
+            Snapshot.capture(window.attachedSheet ?? window, to: URL(fileURLWithPath: output))
+            controller.showCalibrationReminder = false
+            try? await Task.sleep(for: .milliseconds(150))
             controller.shutdown(); try? FileManager.default.removeItem(at: directory)
             NSApp.terminate(nil)
         }

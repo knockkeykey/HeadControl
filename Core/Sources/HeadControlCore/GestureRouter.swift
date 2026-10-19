@@ -23,12 +23,12 @@ public struct GestureRouter: Sendable {
         guard mode == .testing, configuration.isEnabled(gesture) else { return nil }
         return Route(gesture:gesture,binding:configuration.binding(gesture),executes:false,revision:revision)
     }
-    public mutating func update(_ sample: MotionSample, configuration: Configuration, testingGesture: Gesture? = nil) -> Route? {
-        // Recognition also runs while paused so the meter shows the real decision; nothing is routed.
+    public mutating func update(_ sample: MotionSample, configuration: Configuration, testingGesture: Gesture? = nil, feedbackWhenPaused: Bool = false) -> Route? {
+        // A visible gesture page may request recognition feedback while paused, never key execution.
         var gestures = Set(configuration.enabledGestures)
         if mode == .testing, let testingGesture { gestures.formIntersection([testingGesture]) }
         let recognized = recognizer.update(sample,tuning:configuration.tuning,enabledGestures:gestures)
-        guard mode != .paused, let gesture = recognized else { return nil }
+        guard let gesture = recognized, mode != .paused || feedbackWhenPaused else { return nil }
         let binding = configuration.binding(gesture)
         return Route(gesture:gesture,binding:binding,executes:mode == .active && binding.action != .disabled,revision:revision)
     }

@@ -3,6 +3,7 @@ import SwiftUI
 struct GesturesPage: View {
     @ObservedObject var controller: AppController
     @ObservedObject var store: ConfigurationStore
+    var showStatus: () -> Void = {}
     @State private var selected: Gesture = .tiltLeft
     @State private var recording: Gesture?
     private var motion: MotionService { controller.motion }
@@ -12,10 +13,11 @@ struct GesturesPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if !controller.enabled { startControlPrompt }
             HStack(alignment: .top, spacing: 16) {
-                Card(padding: 0) {
-                    HeadOrbView(pose: motion.pose, ghost: ghost, link: motion.link, enabled: controller.enabled)
-                        .frame(height: 300).frame(maxWidth: .infinity)
+                Card(padding: 0, fillsHeight: true) {
+                    HeadOrbView(pose: motion.pose, ghost: ghost, link: motion.link, enabled: controller.enabled, showsBodyBackdrop: true)
+                        .frame(maxWidth: .infinity, minHeight: 300, maxHeight: .infinity)
                         .overlay(alignment: .topLeading) {
                             HStack(spacing: 6) {
                                 Circle().fill(controller.walkingPaused ? Color.orange : motion.link.tone.color).frame(width: 8, height: 8)
@@ -25,6 +27,7 @@ struct GesturesPage: View {
                 }
                 testCard.frame(width: 300)
             }
+            .fixedSize(horizontal: false, vertical: true)
             jointTestCard
             // Directly above the tiles so the keyboard appears next to the gesture being bound.
             if let gesture = recording {
@@ -53,6 +56,31 @@ struct GesturesPage: View {
                 Button("恢复默认按键") { store.configuration.bindings = Configuration.defaultBindings }
             }
         }
+        .onAppear { controller.setPreviewVisible(true, surface: "gestures") }
+        .onDisappear { controller.setPreviewVisible(false, surface: "gestures") }
+    }
+
+    private var startControlPrompt: some View {
+        Card {
+            HStack(spacing: 12) {
+                Image(systemName: "pause.circle.fill").font(.title2).foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("头势控制未启动").font(.headline)
+                    Text("这里仍可查看达标效果、听提醒音。点击启动后，头势才会执行快捷键。")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if !controller.readyToEnable {
+                        Text(!motion.calibrated ? "请先连接耳机并校准正前方。" : "请先到“状态”页授予辅助功能权限。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                VStack(spacing: 8) {
+                    Button("启动头势控制") { controller.setEnabled(true) }
+                        .buttonStyle(.borderedProminent).disabled(!controller.readyToEnable)
+                    if !controller.readyToEnable { Button("前往状态页", action: showStatus) }
+                }.fixedSize()
+            }
+        }
     }
 
     private var ghost: MotionSample? {
@@ -63,52 +91,87 @@ struct GesturesPage: View {
     // MARK: Test flow
 
     private var testCard: some View {
-        Card {
+        Card(fillsHeight: true) {
             VStack(alignment: .leading, spacing: 14) {
                 SectionTitle(title: "校准与测试")
-                if !motion.tracking {
-                    CheckLine(ok: false, title: "先戴上耳机", detail: motion.link.detail)
-                    Button("重新连接") { motion.reconnect() }
-                } else if motion.calibrating {
-                    Text(motion.calibrationHint).font(.callout).foregroundStyle(.secondary)
-                    ProgressView(value: motion.calibrationProgress)
-                    Button("取消校准") { motion.cancelCalibration() }
-                } else if !motion.calibrated {
-                    Text(motion.calibrationHint + "。点击校准后保持静止一秒。").font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button { controller.calibrate() } label: { Label("校准正前方", systemImage: "scope").frame(maxWidth: .infinity) }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                } else if let target = controller.testTarget {
-                    HStack(spacing: 14) {
-                        ZStack {
-                            Circle().stroke(Color.secondary.opacity(0.15), lineWidth: 5)
-                            Circle().trim(from: 0, to: Double(controller.practiceCounts[target] ?? 0) / 3).stroke(Color.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                                .rotationEffect(.degrees(-90)).animation(.spring, value: controller.practiceCounts[target] ?? 0)
-                            GestureGlyph(gesture: target, size: 20).foregroundStyle(Color.accentColor)
-                        }.frame(width: 54, height: 54)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(target.title) · \(controller.practiceCounts[target] ?? 0)/3 次").font(.headline)
-                            Text(target.prompt).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    Text("舒适地做三次，每次都回正。练习会记录实际幅度，未达到当前门槛也能收集；全程不发键。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button("结束测试") { controller.setTesting(false) }
-                } else {
-                    Label("已校准 · \(motion.sensor)", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
-                    Text(enabledGestures.isEmpty ? "先打开至少一个头势，再开始测试。" : "逐个练习已开启的 \(enabledGestures.count) 个头势，每个做三次。幅度相近时给出建议，手动采用后再测试。")
-                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button { controller.startAllTests() } label: { Label("依次练习 · 每个三次", systemImage: "play.fill").frame(maxWidth: .infinity) }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(enabledGestures.isEmpty)
-                    HStack {
-                        Button("重新校准") { controller.calibrate() }
-                        if controller.testing { Button("结束测试") { controller.setTesting(false) } }
-                    }
-                    if !controller.testPassed.isEmpty {
-                        Text("当前参数已通过 \(passedCount) / \(enabledGestures.count)").font(.caption).foregroundStyle(.secondary)
-                    }
+                testStatus
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, minHeight: 96, maxHeight: .infinity)
+                Divider()
+                testActions
+            }
+            .frame(maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder private var testStatus: some View {
+        VStack(spacing: 12) {
+            if !motion.tracking {
+                Image(systemName: "airpodspro").font(.system(size: 36)).foregroundStyle(.tertiary)
+                VStack(spacing: 5) {
+                    Text("先戴上耳机").font(.headline)
+                    Text(motion.link.detail).font(.callout).foregroundStyle(.secondary)
+                }
+            } else if motion.calibrating {
+                Image(systemName: "scope").font(.system(size: 36)).foregroundStyle(Color.accentColor)
+                Text(motion.calibrationHint).font(.callout).foregroundStyle(.secondary)
+                ProgressView(value: motion.calibrationProgress)
+            } else if !motion.calibrated {
+                Image(systemName: "scope").font(.system(size: 36)).foregroundStyle(Color.accentColor)
+                Text(motion.calibrationHint + "。点击校准后保持静止一秒。")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if let target = controller.testTarget {
+                ZStack {
+                    Circle().stroke(Color.secondary.opacity(0.15), lineWidth: 5)
+                    Circle().trim(from: 0, to: Double(controller.practiceCounts[target] ?? 0) / 3).stroke(Color.green, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                        .rotationEffect(.degrees(-90)).animation(.spring, value: controller.practiceCounts[target] ?? 0)
+                    GestureGlyph(gesture: target, size: 22).foregroundStyle(Color.accentColor)
+                }.frame(width: 58, height: 58)
+                VStack(spacing: 5) {
+                    Text("\(target.title) · \(controller.practiceCounts[target] ?? 0)/3 次").font(.headline)
+                    Text(target.prompt).font(.callout).foregroundStyle(.secondary)
+                }
+                Text("舒适地做三次，每次都回正。练习会记录实际幅度，未达到当前门槛也能收集；全程不发键。")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Image(systemName: "checkmark.circle.fill").font(.system(size: 36)).foregroundStyle(.green)
+                Text("已校准 · \(motion.sensor)").font(.headline)
+                Text(enabledGestures.isEmpty ? "先打开至少一个头势，再开始测试。" : "逐个练习已开启的 \(enabledGestures.count) 个头势，每个做三次。幅度相近时给出建议，手动采用后再测试。")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    @ViewBuilder private var testActions: some View {
+        VStack(spacing: 10) {
+            if !motion.tracking {
+                Button { motion.reconnect() } label: { Text("重新连接").frame(maxWidth: .infinity) }
+            } else if motion.calibrating {
+                Button { motion.cancelCalibration() } label: { Text("取消校准").frame(maxWidth: .infinity) }
+            } else if !motion.calibrated {
+                Button { controller.calibrate() } label: { Label("校准正前方", systemImage: "scope").frame(maxWidth: .infinity) }
+                    .buttonStyle(.borderedProminent)
+            } else if controller.testTarget != nil {
+                Button { controller.setTesting(false) } label: { Text("结束测试").frame(maxWidth: .infinity) }
+            } else {
+                Button { controller.startAllTests() } label: { Label("依次练习 · 每个三次", systemImage: "play.fill").frame(maxWidth: .infinity) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(enabledGestures.isEmpty)
+                HStack {
+                    Button("重新校准正前方") { controller.calibrate() }
+                    if controller.testing { Button("结束测试") { controller.setTesting(false) } }
+                }.controlSize(.regular)
+                Text("换坐姿、调整耳机，或回正后角度仍有偏移时使用。正对屏幕，点击后保持静止一秒，将当前朝向设为正前方。校准完成后需手动启动头势控制。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                if !controller.testPassed.isEmpty {
+                    Text("当前参数已通过 \(passedCount) / \(enabledGestures.count)").font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
+        .buttonStyle(.bordered).controlSize(.large)
+        .frame(maxWidth: .infinity)
     }
 
     private var jointTestCard: some View {
@@ -185,7 +248,7 @@ struct GesturesPage: View {
             ArcGauge(value: enabled && motion.calibrated ? g.travel(motion.pose) : 0,
                      threshold: angleBinding(g), neutral: t.neutral,
                      peak: controller.testPeaks[g], suggestion: suggestion?.angle,
-                     lit: testing, ready: enabled && ready(g))
+                     lit: enabled && controller.hudTrigger?.gesture == g, ready: enabled && ready(g))
                 .frame(height: 96)
                 .opacity(enabled ? 1 : 0.4)
             statusLine(g, t)
@@ -278,6 +341,7 @@ struct GesturesPage: View {
 
     /// Green only when the recognizer would actually accept this gesture right now, not merely when the angle is past the knob.
     private func ready(_ g: Gesture) -> Bool {
+        if controller.hudTrigger?.gesture == g { return true }
         guard let phase = controller.gestureStatus[g]?.phase else { return false }
         return phase == .holding || phase == .fired
     }
@@ -287,6 +351,9 @@ struct GesturesPage: View {
         if !store.configuration.isEnabled(g) {
             Text("不参与识别，也不占用冷却时间").font(.caption2).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: 14, maxHeight: 14, alignment: .leading)
+        } else if motion.calibrated, controller.hudTrigger?.gesture == g {
+            Text(controller.hudTrigger?.outcome == .idlePreview ? "已达标 · 未启动控制" : "已达标")
+                .font(.caption2).foregroundStyle(.green).frame(height: 14)
         } else if motion.calibrated, let st = controller.gestureStatus[g] {
             let (text, color): (String, Color) = {
                 switch st.phase {
