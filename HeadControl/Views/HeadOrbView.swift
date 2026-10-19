@@ -256,20 +256,24 @@ final class HeadOrbScene {
         pod.transparency = status == .paused ? 0.6 : 1
     }
 
-    /// AirPods Pro: rounded bud in the ear, short stem pointing down and slightly forward.
+    /// AirPods Pro deliberately visible along the head's side silhouette.
     private func airPod(side: CGFloat) -> SCNNode {
-        let root = SCNNode(); root.position = SCNVector3(1.0 * side, -0.04, 0.06)
-        let bud = SCNNode(geometry: SCNSphere(radius: 0.21)); bud.geometry?.firstMaterial = pod
-        bud.scale = SCNVector3(0.85, 1, 1.05)
+        // Sit the bud on the outer edge instead of burying it in the orb. A little
+        // overlap keeps it attached, while the larger oval reads clearly at this scale.
+        let root = SCNNode(); root.position = SCNVector3(1.0 * side, -0.02, 0.16)
+        let bud = SCNNode(geometry: SCNSphere(radius: 0.24)); bud.geometry?.firstMaterial = pod
+        bud.scale = SCNVector3(0.88, 1.02, 1.0)
         root.addChildNode(bud)
-        let stem = SCNNode(geometry: SCNCapsule(capRadius: 0.065, height: 0.46)); stem.geometry?.firstMaterial = pod
-        stem.position = SCNVector3(0.07 * side, -0.27, -0.06); stem.eulerAngles = SCNVector3(-0.25, 0, 0.12 * side)
+        let stem = SCNNode(geometry: SCNCapsule(capRadius: 0.065, height: 0.44)); stem.geometry?.firstMaterial = pod
+        // Let the stem follow the outer contour, with a gentle inward lean toward its tip.
+        stem.position = SCNVector3(0.025 * side, -0.30, 0.015)
+        stem.eulerAngles = SCNVector3(-0.18, 0, -0.10 * side)
         root.addChildNode(stem)
         // Status light: a small glowing dot on the bud's outer face.
         let dot = SCNSphere(radius: 0.055)
         let dotMaterial = SCNMaterial(); dotMaterial.lightingModel = .constant; dot.firstMaterial = dotMaterial
         let halo = SCNNode(geometry: dot)
-        halo.position = SCNVector3(0.16 * side, 0.03, 0.02); halo.scale = SCNVector3(0.5, 1, 1)
+        halo.position = SCNVector3(0.19 * side, 0.03, 0.04); halo.scale = SCNVector3(0.5, 1, 1)
         root.addChildNode(halo); halos.append(halo)
         return root
     }
